@@ -1,0 +1,3922 @@
+local addonName, ns = ...
+ns = _G.QFXSystemBarNS or ns
+if not ns then return end
+ns.InfoBarLoaded = true
+
+-- ========================================================================
+-- QFXSystemBar Info Bar
+-- ------------------------------------------------------------------------
+-- QFX modular info strips.
+-- Each strip can independently edit visibility, content order, position, size,
+-- and gradient direction without relying on external UI naming or layouts.
+-- ========================================================================
+
+local DEFAULT_INFOBAR_WIDTH = 450
+local DEFAULT_INFOBAR_HEIGHT = 18
+local DEFAULT_INFOBAR_FONT_SIZE = 12
+local DEFAULT_INFOBAR_LINE_THICKNESS = 1
+local DEFAULT_INFOBAR_LINE_STYLE = "eui-taskbar"
+local DEFAULT_INFOBAR_LINE_POSITION_LEFT = "both"
+local DEFAULT_INFOBAR_LINE_POSITION_RIGHT = "both"
+local MAX_TOOLTIP_ADDONS = 10
+local MAX_INFOBAR_ITEMS_PER_BAR = 5
+local INFOBAR_ICON_SIZE = 18
+local INFOBAR_ICON_GAP = 3
+-- Text buttons clip their children, and the text fills the button box. A
+-- font's rendered line box grows both with its point size and with glyph
+-- fallback (a Latin-only EUI font renders CJK through a taller fallback
+-- face), so the box is sized from the font size rather than the strip height:
+-- at least 1.9x the font size plus outline room, never smaller than the strip.
+local function GetInfoBarTextBoxHeight(stripHeight, fontSize)
+    local minTextHeight = math.ceil((tonumber(fontSize) or 12) * 1.9) + 4
+    if minTextHeight < (stripHeight or 0) then return stripHeight end
+    return minTextHeight
+end
+
+local function LT(key)
+    if key == nil then return "" end
+    if type(key) ~= "string" then return tostring(key) end
+    if ns and ns.T then return ns.T(key) end
+    if ns and ns.UIText then return ns.UIText(key) end
+    return key
+end
+
+local function LF(key, ...)
+    local text = LT(key)
+    local ok, value = pcall(string.format, text, ...)
+    if ok then return value end
+    return text
+end
+
+local function ShortInfoLabel(key, englishShort)
+    local locale = ns and ns.currentLocale
+    if locale == nil or locale == "enUS" or locale == "enGB" then
+        return englishShort or key
+    end
+    return LT(key)
+end
+
+local INFOBAR_ITEM_ORDER = {"ilvl", "mplus", "fps", "combatlog", "meetingstone", "profession", "secondaryprofession", "mount", "guild", "friend", "zone", "coords",
+    "phase", "spec", "dura", "gold", "volume", "time", "greatvault", "mrt", "mdt", "crest_adventurer", "crest_veteran", "crest_champion", "crest_hero", "crest_mythic"}
+local INFOBAR_ITEM_INDEX = {}
+for i, id in ipairs(INFOBAR_ITEM_ORDER) do INFOBAR_ITEM_INDEX[id] = i end
+
+local LEFT_DEFAULT_ITEMS = { ilvl = true, mplus = true, fps = true, combatlog = true }
+local LEFT_BOTTOM_DEFAULT_ITEMS = { guild = true, friend = true, coords = true, phase = true }
+local RIGHT_DEFAULT_ITEMS = { spec = true, dura = true, gold = true, volume = true }
+
+local function CopyArray(src)
+    local out = {}
+    for i, v in ipairs(src or {}) do out[i] = v end
+    return out
+end
+
+local function CopyMap(src)
+    local out = {}
+    for k, v in pairs(src or {}) do out[k] = v end
+    return out
+end
+
+ns.defaults = ns.defaults or {}
+ns.defaults.isInfoBar = false
+ns.defaults.infoBarLeftEnabled = true
+ns.defaults.infoBarLeftBottomEnabled = false
+ns.defaults.infoBarRightEnabled = true
+ns.defaults.infoBarLeftWidth = DEFAULT_INFOBAR_WIDTH
+ns.defaults.infoBarLeftBottomWidth = DEFAULT_INFOBAR_WIDTH
+ns.defaults.infoBarRightWidth = DEFAULT_INFOBAR_WIDTH
+ns.defaults.infoBarLeftHeight = DEFAULT_INFOBAR_HEIGHT
+ns.defaults.infoBarLeftBottomHeight = DEFAULT_INFOBAR_HEIGHT
+ns.defaults.infoBarRightHeight = DEFAULT_INFOBAR_HEIGHT
+ns.defaults.infoBarLeftFade = "left"
+ns.defaults.infoBarLeftBottomFade = "left"
+ns.defaults.infoBarRightFade = "right"
+ns.defaults.infoBarFadeStrength = 50
+ns.defaults.infoBarFontSize = DEFAULT_INFOBAR_FONT_SIZE
+ns.defaults.infoBarLineThickness = DEFAULT_INFOBAR_LINE_THICKNESS -- legacy migration only
+ns.defaults.infoBarLineStyle = DEFAULT_INFOBAR_LINE_STYLE -- legacy migration only
+ns.defaults.infoBarLeftLineThickness = DEFAULT_INFOBAR_LINE_THICKNESS
+ns.defaults.infoBarLeftBottomLineThickness = DEFAULT_INFOBAR_LINE_THICKNESS
+ns.defaults.infoBarRightLineThickness = DEFAULT_INFOBAR_LINE_THICKNESS
+ns.defaults.infoBarLeftLineStyle = DEFAULT_INFOBAR_LINE_STYLE
+ns.defaults.infoBarLeftBottomLineStyle = DEFAULT_INFOBAR_LINE_STYLE
+ns.defaults.infoBarRightLineStyle = DEFAULT_INFOBAR_LINE_STYLE
+ns.defaults.infoBarLeftLinePosition = DEFAULT_INFOBAR_LINE_POSITION_LEFT
+ns.defaults.infoBarLeftBottomLinePosition = DEFAULT_INFOBAR_LINE_POSITION_LEFT
+ns.defaults.infoBarRightLinePosition = DEFAULT_INFOBAR_LINE_POSITION_RIGHT
+ns.defaults.infoBarLeftUnlocked = false
+ns.defaults.infoBarLeftBottomUnlocked = false
+ns.defaults.infoBarRightUnlocked = false
+ns.defaults.infoBarLeftX = 0
+ns.defaults.infoBarLeftY = 0
+ns.defaults.infoBarLeftBottomX = 0
+ns.defaults.infoBarLeftBottomY = 0
+ns.defaults.infoBarRightX = 0
+ns.defaults.infoBarRightY = 0
+ns.defaults.infoBarLeftOrder = CopyArray(INFOBAR_ITEM_ORDER)
+ns.defaults.infoBarLeftBottomOrder = CopyArray(INFOBAR_ITEM_ORDER)
+ns.defaults.infoBarRightOrder = CopyArray(INFOBAR_ITEM_ORDER)
+ns.defaults.infoBarLeftItems = CopyMap(LEFT_DEFAULT_ITEMS)
+ns.defaults.infoBarLeftBottomItems = CopyMap(LEFT_BOTTOM_DEFAULT_ITEMS)
+ns.defaults.infoBarRightItems = CopyMap(RIGHT_DEFAULT_ITEMS)
+ns.defaults.infoBarEuiSkin = true
+
+ns.InfoBarItems = {
+    greatvault = { labelKey = "Vault", tooltipKey = "Show Great Vault text and progress. Left-click opens or closes the Great Vault." },
+    mrt = { labelKey = "MRT", tooltipKey = "Show MRT text. Left-click opens or closes Method Raid Tools." },
+    mdt = { labelKey = "MDT", tooltipKey = "Show MDT text. Left-click opens or closes Mythic Dungeon Tools." },
+    guild = { labelKey = "Guild", tooltipKey = "Show online guild members." },
+    friend = { labelKey = "Friends", tooltipKey = "Show online Battle.net and character friends." },
+    meetingstone = { labelKey = "MeetingStone", tooltipKey = "Show the detected group-finder addon name on this info bar. Left-click opens its UI." },
+    profession = { labelKey = "Primary Professions", tooltipKey = "Show learned primary profession icons. Left-click opens the first profession and right-click opens the second." },
+    secondaryprofession = { labelKey = "Secondary Professions", tooltipKey = "Show learned Cooking, Fishing, and Archaeology icons. Left-click opens Cooking, right-click opens Fishing, and middle-click opens Archaeology." },
+    mount = { labelKey = "Mount", tooltipKey = "Show a mount icon. Left, middle, and right click can summon separately configured mounts." },
+    fps = { labelKey = "FPS / Latency", tooltipKey = "Show framerate and latency together. Tooltip shows addon memory and latency details." },
+    combatlog = { labelKey = "Advanced Combat Log", tooltipKey = "Show Advanced Combat Logging state. Left click turns it on. Right click turns it off." },
+    zone = { labelKey = "Location", tooltipKey = "Show current zone and coordinates tooltip." },
+    coords = { labelKey = "Coordinates", tooltipKey = "Show player coordinates. Left click opens the world map. Right click creates a waypoint at your current position." },
+    phase = { labelKey = "Phase ID", tooltipKey = "Show the current map or instance ID as the available phase-style identifier." },
+    spec = { labelKey = "Specialization", tooltipKey = "Left click chooses a saved talent loadout. Right click changes loot specialization." },
+    ilvl = { labelKey = "Item Level", tooltipKey = "Show equipped item level." },
+    mplus = { labelKey = "Mythic+ Score", tooltipKey = "Show current Mythic+ rating." },
+    dura = { labelKey = "Durability", tooltipKey = "Show equipped durability." },
+    gold = { labelKey = "Gold", tooltipKey = "Show current money and session profit/loss. Right click toggles free bag slots." },
+    volume = { labelKey = "Volume", tooltipKey = "Show master volume. Left click opens a volume slider. Right click toggles mute." },
+    time = { labelKey = "Time", tooltipKey = "Show time and raid lockouts. Left click opens calendar." },
+    crest_adventurer = { labelKey = "Adventurer's Crest", tooltipKey = "Show Adventurer's Crest amount.", span = 0.4 },
+    crest_veteran = { labelKey = "Veteran's Crest", tooltipKey = "Show Veteran's Crest amount.", span = 0.4 },
+    crest_champion = { labelKey = "Champion's Crest", tooltipKey = "Show Champion's Crest amount.", span = 0.4 },
+    crest_hero = { labelKey = "Hero's Crest", tooltipKey = "Show Hero's Crest amount.", span = 0.4 },
+    crest_mythic = { labelKey = "Mythic Crest", tooltipKey = "Show Mythic Crest amount.", span = 0.4 },
+}
+ns.InfoBarAllItems = CopyArray(INFOBAR_ITEM_ORDER)
+ns.InfoBarDefaultOrder = CopyArray(INFOBAR_ITEM_ORDER)
+ns.InfoBarMaxItems = MAX_INFOBAR_ITEMS_PER_BAR
+
+local INFOBAR_ITEM_SOURCE_TO_ID = {
+    ["Vault"] = "greatvault",
+    ["Great Vault"] = "greatvault",
+    ["GreatVault"] = "greatvault",
+    ["MRT"] = "mrt",
+    ["MDT"] = "mdt",
+    ["Guild"] = "guild",
+    ["Friends"] = "friend",
+    ["Social"] = "friend",
+    ["MeetingStone"] = "meetingstone",
+    ["Meeting Stone"] = "meetingstone",
+    ["Primary Professions"] = "profession",
+    ["Primary Profession"] = "profession",
+    ["Professions"] = "profession",
+    ["Profession"] = "profession",
+    ["Secondary Professions"] = "secondaryprofession",
+    ["Secondary Profession"] = "secondaryprofession",
+    ["Mount"] = "mount",
+    ["Mounts"] = "mount",
+    ["FPS / Latency"] = "fps",
+    ["FPS/MS"] = "fps",
+    ["FPS"] = "fps",
+    ["Latency"] = "fps",
+    ["Advanced Combat Log"] = "combatlog",
+    ["Combat Log"] = "combatlog",
+    ["ACL"] = "combatlog",
+    ["Location"] = "zone",
+    ["Zone"] = "zone",
+    ["Coordinates"] = "coords",
+    ["Coords"] = "coords",
+    ["Phase ID"] = "phase",
+    ["Phase"] = "phase",
+    ["Specialization"] = "spec",
+    ["Spec"] = "spec",
+    ["Item Level"] = "ilvl",
+    ["iLvl"] = "ilvl",
+    ["Mythic+ Score"] = "mplus",
+    ["Score"] = "mplus",
+    ["M+"] = "mplus",
+    ["Durability"] = "dura",
+    ["Dura"] = "dura",
+    ["Gold"] = "gold",
+    ["Money"] = "gold",
+    ["Volume"] = "volume",
+    ["Master Volume"] = "volume",
+    ["Time"] = "time",
+    ["Adventurer's Crest"] = "crest_adventurer",
+    ["Veteran's Crest"] = "crest_veteran",
+    ["Champion's Crest"] = "crest_champion",
+    ["Hero's Crest"] = "crest_hero",
+    ["Mythic Crest"] = "crest_mythic",
+}
+
+function ns.NormalizeInfoBarItemID(value)
+    if type(value) ~= "string" then return nil end
+    if ns.InfoBarItems and ns.InfoBarItems[value] then return value end
+    local normalized = ns.NormalizeLocaleKey and ns.NormalizeLocaleKey(value) or value
+    return INFOBAR_ITEM_SOURCE_TO_ID[normalized] or INFOBAR_ITEM_SOURCE_TO_ID[value] or normalized
+end
+
+local function NormalizeInfoBarEnabledMap(map)
+    if type(map) ~= "table" then return end
+    local updates = nil
+    for key, value in pairs(map) do
+        if type(key) == "string" then
+            local id = ns.NormalizeInfoBarItemID and ns.NormalizeInfoBarItemID(key) or key
+            if type(id) == "string" and id ~= "" and ns.InfoBarItems[id] and id ~= key then
+                updates = updates or {}
+                updates[key] = id
+            end
+        end
+    end
+    if updates then
+        for oldKey, newKey in pairs(updates) do
+            if map[newKey] == nil then map[newKey] = map[oldKey] end
+            map[oldKey] = nil
+        end
+    end
+    if map.ping == true and map.fps == nil then map.fps = true end
+    map.ping = nil
+end
+
+ns.InfoBarSlots = {
+    left = {
+        labelKey = "Left Top Info Bar",
+        orderKey = "infoBarLeftOrder",
+        enabledKey = "infoBarLeftItems",
+        unlockedKey = "infoBarLeftUnlocked",
+        xKey = "infoBarLeftX",
+        yKey = "infoBarLeftY",
+        widthKey = "infoBarLeftWidth",
+        heightKey = "infoBarLeftHeight",
+        fadeKey = "infoBarLeftFade",
+        lineStyleKey = "infoBarLeftLineStyle",
+        linePositionKey = "infoBarLeftLinePosition",
+        lineThicknessKey = "infoBarLeftLineThickness",
+        barEnabledKey = "infoBarLeftEnabled",
+        frameName = "QFXSystemBarLeftTopInfoStrip",
+        anchor = "TOPLEFT",
+        defaultX = 0,
+        defaultY = 0,
+        defaultFade = "left",
+        defaultItems = LEFT_DEFAULT_ITEMS,
+        align = "left",
+    },
+    leftbottom = {
+        labelKey = "Left Bottom Info Bar",
+        orderKey = "infoBarLeftBottomOrder",
+        enabledKey = "infoBarLeftBottomItems",
+        unlockedKey = "infoBarLeftBottomUnlocked",
+        xKey = "infoBarLeftBottomX",
+        yKey = "infoBarLeftBottomY",
+        widthKey = "infoBarLeftBottomWidth",
+        heightKey = "infoBarLeftBottomHeight",
+        fadeKey = "infoBarLeftBottomFade",
+        lineStyleKey = "infoBarLeftBottomLineStyle",
+        linePositionKey = "infoBarLeftBottomLinePosition",
+        lineThicknessKey = "infoBarLeftBottomLineThickness",
+        barEnabledKey = "infoBarLeftBottomEnabled",
+        frameName = "QFXSystemBarLeftBottomInfoStrip",
+        anchor = "BOTTOMLEFT",
+        defaultX = 0,
+        defaultY = 0,
+        defaultFade = "left",
+        defaultItems = LEFT_BOTTOM_DEFAULT_ITEMS,
+        align = "left",
+    },
+    right = {
+        labelKey = "Right Bottom Info Bar",
+        orderKey = "infoBarRightOrder",
+        enabledKey = "infoBarRightItems",
+        unlockedKey = "infoBarRightUnlocked",
+        xKey = "infoBarRightX",
+        yKey = "infoBarRightY",
+        widthKey = "infoBarRightWidth",
+        heightKey = "infoBarRightHeight",
+        fadeKey = "infoBarRightFade",
+        lineStyleKey = "infoBarRightLineStyle",
+        linePositionKey = "infoBarRightLinePosition",
+        lineThicknessKey = "infoBarRightLineThickness",
+        barEnabledKey = "infoBarRightEnabled",
+        frameName = "QFXSystemBarRightBottomInfoStrip",
+        anchor = "BOTTOMRIGHT",
+        defaultX = 0,
+        defaultY = 0,
+        defaultFade = "right",
+        defaultItems = RIGHT_DEFAULT_ITEMS,
+        align = "right",
+    },
+}
+
+local bars = {}
+local modules = {}
+local eventFrame
+local tooltipTicker
+local tooltipTickerOwner
+local itemTickers = {}
+local RefreshInfoBarItem
+local UpdateItemTickers
+local UpdateInfoBarEventRegistration
+local IsAnyInfoBarItemEnabled
+local QueueInfoBarRefresh
+
+-- Idle-CPU tuning: fps/coords are the only perpetual tickers. coords 1s->2s
+-- halves C_Map calls while staying smooth on the move; fps 3s->5s is plenty
+-- for a text readout; meetingstone is fully event-driven (LDB callback +
+-- ADDON_LOADED + LFG applicant events) so it needs no polling ticker.
+-- time stays at 60s (one wakeup per minute).
+local ITEM_REFRESH_INTERVALS = {
+    fps = 5,
+    time = 60,
+    coords = 2,
+}
+
+local ADVANCED_COMBAT_LOG_CVAR = "advancedCombatLogging"
+local VOLUME_MASTER_CVAR = "Sound_MasterVolume"
+local VOLUME_MUTE_CVAR = "Sound_EnableAllSound"
+
+local CVAR_ITEM_REFRESH = {
+    [ADVANCED_COMBAT_LOG_CVAR] = { combatlog = true },
+    [VOLUME_MASTER_CVAR] = { volume = true },
+    [VOLUME_MUTE_CVAR] = { volume = true },
+}
+
+local EVENT_ITEM_REFRESH = {
+    CURRENCY_DISPLAY_UPDATE = { crest_adventurer = true, crest_veteran = true, crest_champion = true, crest_hero = true, crest_mythic = true },
+    PLAYER_MONEY = { gold = true },
+    SEND_MAIL_MONEY_CHANGED = { gold = true },
+    SEND_MAIL_COD_CHANGED = { gold = true },
+    PLAYER_TRADE_MONEY = { gold = true },
+    TRADE_MONEY_CHANGED = { gold = true },
+    BAG_UPDATE_DELAYED = { gold = true },
+    UPDATE_INVENTORY_DURABILITY = { dura = true },
+    PLAYER_EQUIPMENT_CHANGED = { dura = true, ilvl = true },
+    PLAYER_AVG_ITEM_LEVEL_UPDATE = { ilvl = true },
+    CHALLENGE_MODE_COMPLETED = { mplus = true },
+    ACTIVE_PLAYER_SPECIALIZATION_CHANGED = { spec = true, mplus = true },
+    PLAYER_SPECIALIZATION_CHANGED = { spec = true, mplus = true },
+    PLAYER_LOOT_SPEC_UPDATED = { spec = true },
+    ZONE_CHANGED = { zone = true, coords = true, phase = true },
+    ZONE_CHANGED_INDOORS = { zone = true, coords = true, phase = true },
+    ZONE_CHANGED_NEW_AREA = { zone = true, coords = true, phase = true },
+    FRIENDLIST_UPDATE = { friend = true },
+    BN_FRIEND_ACCOUNT_ONLINE = { friend = true },
+    BN_FRIEND_ACCOUNT_OFFLINE = { friend = true },
+    BN_FRIEND_INFO_CHANGED = { friend = true },
+    GUILD_ROSTER_UPDATE = { guild = true },
+    PLAYER_GUILD_UPDATE = { guild = true },
+    LFG_LIST_APPLICATION_STATUS_UPDATED = { meetingstone = true },
+    LFG_LIST_APPLICANT_LIST_UPDATED = { meetingstone = true },
+    LFG_LIST_APPLICANT_UPDATED = { meetingstone = true },
+    SPELLS_CHANGED = { profession = true, secondaryprofession = true },
+    TRADE_SKILL_DETAILS_UPDATE = { profession = true, secondaryprofession = true },
+    CVAR_UPDATE = { volume = true, combatlog = true },
+    UPDATE_INSTANCE_INFO = { time = true },
+}
+local loginTime = 0
+local showCPU
+local showSlots
+
+local function DB()
+    QFXSystemBarDB = QFXSystemBarDB or {}
+    return QFXSystemBarDB
+end
+
+local BlockInCombat
+
+-- ========================================================================
+-- Mount actions
+-- ========================================================================
+
+local MOUNT_RANDOM_ICON = "Interface\\Icons\\MountJournalPortrait"
+local MOUNT_RANDOM_SPELL_ID = 150544
+local MOUNT_SIDE_SETTINGS = {
+    { button = "LeftButton", dbKey = "infoBarMountLeft", labelKey = "Left Click", defaultValue = ns.MOUNT_RANDOM_VALUE or "random" },
+    { button = "MiddleButton", dbKey = "infoBarMountMiddle", labelKey = "Middle Click", defaultValue = "none" },
+    { button = "RightButton", dbKey = "infoBarMountRight", labelKey = "Right Click", defaultValue = "none" },
+}
+
+local function GetMountInfo(mountID)
+    mountID = tonumber(mountID)
+    if not mountID or not C_MountJournal or not C_MountJournal.GetMountInfoByID then return nil end
+    local ok, name, spellID, icon, isActive, isUsable, sourceType, isFavorite,
+        isFactionSpecific, faction, shouldHideOnChar, isCollected = pcall(C_MountJournal.GetMountInfoByID, mountID)
+    if not ok or not name then return nil end
+    return {
+        mountID = mountID,
+        name = name,
+        spellID = spellID,
+        icon = icon,
+        isActive = isActive,
+        isUsable = isUsable,
+        isFavorite = isFavorite,
+        isFactionSpecific = isFactionSpecific,
+        faction = faction,
+        shouldHideOnChar = shouldHideOnChar,
+        isCollected = isCollected,
+    }
+end
+
+local function GetMountActionName(value)
+    value = tostring(value or "none")
+    if value == "none" or value == "" then return LT("No Action") end
+    if value == (ns.MOUNT_RANDOM_VALUE or "random") then
+        return _G.MOUNT_JOURNAL_SUMMON_RANDOM_FAVORITE_MOUNT or LT("Random Favorite Mount")
+    end
+    local info = GetMountInfo(value)
+    return info and info.name or (LT("Mount") .. " " .. value)
+end
+ns.GetMountActionName = GetMountActionName
+
+local function GetMountActionIcon(value)
+    value = tostring(value or "none")
+    if value == (ns.MOUNT_RANDOM_VALUE or "random") then
+        local icon
+        if C_Spell and C_Spell.GetSpellTexture then
+            local ok, result = pcall(C_Spell.GetSpellTexture, MOUNT_RANDOM_SPELL_ID)
+            if ok then icon = result end
+        elseif GetSpellTexture then
+            local ok, result = pcall(GetSpellTexture, MOUNT_RANDOM_SPELL_ID)
+            if ok then icon = result end
+        end
+        return icon or MOUNT_RANDOM_ICON
+    end
+    local info = GetMountInfo(value)
+    return info and info.icon or nil
+end
+
+local function MountIconMarkup(value, size)
+    local icon = GetMountActionIcon(value)
+    if not icon then return nil end
+    size = math.max(10, math.floor(tonumber(size) or 14))
+    -- Trim the mostly transparent native edge so the requested display size
+    -- is used by the visible artwork instead of being lost to icon padding.
+    return string.format("|T%s:%d:%d:0:0:64:64:4:60:4:60|t", tostring(icon), size, size)
+end
+
+local function GetConfiguredMountIcons(size)
+    local icons = {}
+    local db = DB()
+    for _, side in ipairs(MOUNT_SIDE_SETTINGS) do
+        local value = tostring(db[side.dbKey] or side.defaultValue or "none")
+        if value ~= "none" and value ~= "" then
+            local icon = MountIconMarkup(value, size)
+            if icon then icons[#icons + 1] = icon end
+        end
+    end
+    return #icons > 0 and table.concat(icons, " ") or nil
+end
+
+local function GetConfiguredMountIconTextures()
+    local textures = {}
+    local db = DB()
+    for _, side in ipairs(MOUNT_SIDE_SETTINGS) do
+        local value = tostring(db[side.dbKey] or side.defaultValue or "none")
+        if value ~= "none" and value ~= "" then
+            local icon = GetMountActionIcon(value)
+            if icon then textures[#textures + 1] = icon end
+        end
+    end
+    return textures
+end
+
+function ns.GetInfoBarMountPreviewText()
+    return GetConfiguredMountIcons(INFOBAR_ICON_SIZE) or LT("Mount")
+end
+
+function ns.GetMountDropdownOptions()
+    local options = {
+        { value = "none", text = LT("No Action") },
+        {
+            value = ns.MOUNT_RANDOM_VALUE or "random",
+            text = _G.MOUNT_JOURNAL_SUMMON_RANDOM_FAVORITE_MOUNT or LT("Random Favorite Mount"),
+            icon = GetMountActionIcon(ns.MOUNT_RANDOM_VALUE or "random"),
+        },
+    }
+
+    if not C_MountJournal or not C_MountJournal.GetMountIDs then return options end
+    local ok, mountIDs = pcall(C_MountJournal.GetMountIDs)
+    if not ok or type(mountIDs) ~= "table" then return options end
+
+    -- PvPFaction: 0 = Horde, 1 = Alliance. Read once per list build; no polling.
+    local factionGroup = UnitFactionGroup and UnitFactionGroup("player")
+    local playerFaction = factionGroup == "Horde" and 0 or (factionGroup == "Alliance" and 1 or nil)
+    local collected = {}
+    for _, mountID in ipairs(mountIDs) do
+        local info = GetMountInfo(mountID)
+        if info and info.isCollected == true and info.shouldHideOnChar ~= true
+            and (not info.isFactionSpecific or info.faction == nil or playerFaction == nil or info.faction == playerFaction) then
+            collected[#collected + 1] = info
+        end
+    end
+    table.sort(collected, function(a, b)
+        local an, bn = tostring(a.name or ""), tostring(b.name or "")
+        if an == bn then return (a.mountID or 0) < (b.mountID or 0) end
+        if strcmputf8i then return strcmputf8i(an, bn) < 0 end
+        return string.lower(an) < string.lower(bn)
+    end)
+    for _, info in ipairs(collected) do
+        options[#options + 1] = {
+            value = tostring(info.mountID),
+            text = info.name,
+            icon = info.icon,
+        }
+    end
+    return options
+end
+
+local function SummonConfiguredMount(button)
+    if not C_MountJournal or not C_MountJournal.SummonByID then return end
+    for _, side in ipairs(MOUNT_SIDE_SETTINGS) do
+        if side.button == button then
+            local value = tostring(DB()[side.dbKey] or side.defaultValue or "none")
+            if value == "none" or value == "" then return end
+            if BlockInCombat and BlockInCombat() then return end
+            local mountID = value == (ns.MOUNT_RANDOM_VALUE or "random") and 0 or tonumber(value)
+            if mountID then pcall(C_MountJournal.SummonByID, mountID) end
+            return
+        end
+    end
+end
+
+local function GetClassColor()
+    local class
+    if UnitClass then
+        local _, classFile = UnitClass("player")
+        class = classFile
+    end
+    local color = class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
+    if color then return color.r or 1, color.g or 1, color.b or 1 end
+    return 0.6, 0.8, 1
+end
+
+local function ColorHex(r, g, b)
+    return string.format("|cff%02x%02x%02x", math.floor((r or 1) * 255 + 0.5), math.floor((g or 1) * 255 + 0.5), math.floor((b or 1) * 255 + 0.5))
+end
+
+local function MyColor()
+    return ColorHex(GetClassColor())
+end
+
+local function LineString()
+    return "------------------------------"
+end
+
+local function LeftButtonText()
+    return "|TInterface\\TUTORIALFRAME\\UI-TUTORIAL-FRAME:11:11:0:0:512:512:12:66:230:307|t "
+end
+
+local function RightButtonText()
+    return "|TInterface\\TUTORIALFRAME\\UI-TUTORIAL-FRAME:11:11:0:0:512:512:12:66:330:407|t "
+end
+
+local function MiddleButtonText()
+    return "|TInterface\\TUTORIALFRAME\\UI-TUTORIAL-FRAME:11:11:0:0:512:512:12:66:430:507|t "
+end
+
+local function SafeCall(func, ...)
+    if type(func) ~= "function" then return false end
+    local ok = pcall(func, ...)
+    return ok
+end
+
+local function SafeReturn(func, ...)
+    if type(func) ~= "function" then return nil end
+    local ok, a, b, c, d = pcall(func, ...)
+    if ok then return a, b, c, d end
+    return nil
+end
+
+BlockInCombat = function()
+    if InCombatLockdown and InCombatLockdown() then
+        if UIErrorsFrame and UIErrorsFrame.AddMessage then UIErrorsFrame:AddMessage(ERR_NOT_IN_COMBAT or "Not available in combat.") end
+        return true
+    end
+    return false
+end
+
+-- ========================================================================
+-- EllesmereUI skin integration
+-- ------------------------------------------------------------------------
+-- When EllesmereUI is installed and its per-addon third-party skinning is
+-- enabled, the info bars can follow the live EUI theme: panel-colored
+-- backgrounds, accent-colored rails, the user's EUI UI font and a themed
+-- volume panel. Registration is late-bound. EUI queues the callback in the
+-- parent addon and dispatches it at PLAYER_LOGIN (or immediately for this
+-- load-on-demand module); when EUI is missing or the user disabled skinning
+-- for this addon the callback never runs and the QFX look stays as-is.
+-- Every primitive used is idempotent, so the same apply path is safe from
+-- creation code, config changes and live look updates alike.
+-- ========================================================================
+
+local EUI_ACCENT_FALLBACK = { 0.047, 0.824, 0.616 }
+local euiSkin = {
+    facade = nil,
+    fontPath = nil,
+    fontFlag = nil,
+}
+local RegisterInfoBarEuiSkin
+
+local function IsInfoBarEuiSkin()
+    local S = euiSkin.facade
+    if not S then return false end
+    if DB().infoBarEuiSkin == false then return false end
+    if type(S.IsEnabled) == "function" and not S.IsEnabled() then return false end
+    return true
+end
+
+local function GetInfoBarEuiAccentColor()
+    local S = euiSkin.facade
+    if S and type(S.GetAccentColor) == "function" then
+        local r, g, b = S.GetAccentColor()
+        if r then return r, g, b end
+    end
+    return EUI_ACCENT_FALLBACK[1], EUI_ACCENT_FALLBACK[2], EUI_ACCENT_FALLBACK[3]
+end
+
+local function GetInfoBarEuiPanelColor()
+    local S = euiSkin.facade
+    if S and type(S.GetPanelColor) == "function" then
+        local r, g, b, a = S.GetPanelColor()
+        if r then return r, g, b, a end
+    end
+    return 0.05, 0.05, 0.05, 0.92
+end
+
+-- Shared by the bar body/rails and the config preview. Returns the plain QFX
+-- colors when EUI skinning is inactive, so every caller can use one path.
+function ns.GetInfoBarSkinColors()
+    if IsInfoBarEuiSkin() then
+        local pr, pg, pb = GetInfoBarEuiPanelColor()
+        local ar, ag, ab = GetInfoBarEuiAccentColor()
+        return pr, pg, pb, ar, ag, ab
+    end
+    local r, g, b = GetClassColor()
+    return 0, 0, 0, r, g, b
+end
+
+local function GetInfoBarTextFont()
+    if IsInfoBarEuiSkin() and type(euiSkin.fontPath) == "string" and euiSkin.fontPath ~= "" then
+        return euiSkin.fontPath, euiSkin.fontFlag or ""
+    end
+    return STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", "OUTLINE"
+end
+
+local function ApplyInfoBarVolumePanelSkin()
+    local panel = ns.infoBarVolumePanel
+    if not panel then return end
+    local S = euiSkin.facade
+    local active = IsInfoBarEuiSkin()
+    local accentR, accentG, accentB = 0.25, 0.55, 0.9
+
+    if panel.SetBackdropColor then
+        if active then
+            local pr, pg, pb, pa = GetInfoBarEuiPanelColor()
+            accentR, accentG, accentB = GetInfoBarEuiAccentColor()
+            panel:SetBackdropColor(pr, pg, pb, pa or 0.92)
+            panel:SetBackdropBorderColor(accentR, accentG, accentB, 0.85)
+        else
+            panel:SetBackdropColor(0.05, 0.05, 0.05, 0.92)
+            panel:SetBackdropBorderColor(0.25, 0.55, 0.9, 0.85)
+        end
+    end
+
+    local skinFont = active and S and type(S.Font) == "function" and S.Font or nil
+    if panel.title then
+        if skinFont then
+            skinFont(panel.title)
+        elseif panel.title.SetFontObject then
+            panel.title:SetFontObject(GameFontHighlightSmall)
+        end
+    end
+    if panel.status then
+        if skinFont then
+            skinFont(panel.status)
+        elseif panel.status.SetFontObject then
+            panel.status:SetFontObject(GameFontNormalSmall)
+        end
+    end
+
+    local slider = panel.slider
+    local thumb = slider and slider.GetThumbTexture and slider:GetThumbTexture()
+    if thumb and thumb.SetVertexColor then
+        if active then
+            thumb:SetVertexColor(accentR, accentG, accentB)
+        else
+            thumb:SetVertexColor(1, 1, 1, 1)
+        end
+    end
+end
+
+local function LoadBlizzardAddon(name)
+    if C_AddOns and C_AddOns.LoadAddOn then pcall(C_AddOns.LoadAddOn, name)
+    elseif LoadAddOn then pcall(LoadAddOn, name) end
+end
+
+local function ToggleCalendarSafe()
+    if BlockInCombat() then return end
+    if C_Calendar and C_Calendar.OpenCalendar then
+        pcall(C_Calendar.OpenCalendar)
+    elseif ToggleCalendar then
+        pcall(ToggleCalendar)
+    end
+end
+
+local function SafeClickNativeButton(...)
+    if BlockInCombat() then return false end
+    for i = 1, select("#", ...) do
+        local name = select(i, ...)
+        local btn = name and _G[name]
+        if btn and btn.Click then
+            local ok = pcall(btn.Click, btn, "LeftButton")
+            if ok then return true end
+        end
+    end
+    return false
+end
+
+local function FormatMemory(value)
+    value = tonumber(value or 0) or 0
+    if value > 1024 then return string.format("%.1f mb", value / 1024) end
+    return string.format("%.0f kb", value)
+end
+
+local function FormatMoney(money, full)
+    money = tonumber(money or 0) or 0
+    local gold = math.floor(money / 10000)
+    local silver = math.floor((money % 10000) / 100)
+    local copper = money % 100
+    local goldSymbol = _G.GOLD_AMOUNT_SYMBOL or "g"
+    local silverSymbol = _G.SILVER_AMOUNT_SYMBOL or "s"
+    local copperSymbol = _G.COPPER_AMOUNT_SYMBOL or "c"
+
+    if money >= 1000000 and not full then
+        local amount = BreakUpLargeNumbers and BreakUpLargeNumbers(tostring(math.floor(money / 10000))) or tostring(math.floor(money / 10000))
+        return amount .. "|cffffd700" .. goldSymbol .. "|r"
+    end
+
+    if money <= 0 then return "0|cffc77050" .. copperSymbol .. "|r" end
+    local text = ""
+    if gold > 0 then text = text .. gold .. "|cffffd700" .. goldSymbol .. "|r" end
+    if silver > 0 then text = text .. (text ~= "" and " " or "") .. silver .. "|cffd0d0d0" .. silverSymbol .. "|r" end
+    if copper > 0 then text = text .. (text ~= "" and " " or "") .. copper .. "|cffc77050" .. copperSymbol .. "|r" end
+    return text
+end
+
+do
+local function GetMoneySessionData()
+    local db = DB()
+    if type(db.infoBarMoneySession) ~= "table" then
+        db.infoBarMoneySession = {
+            initialized = false,
+            startMoney = 0,
+            lastMoney = 0,
+            earned = 0,
+            spent = 0,
+        }
+    end
+    ns.InfoBarMoneySession = db.infoBarMoneySession
+    return db.infoBarMoneySession
+end
+
+function ns.EnsureInfoBarMoneySession()
+    local session = GetMoneySessionData()
+    if session.initialized then return session end
+    if type(GetMoney) ~= "function" then return session end
+
+    local current = tonumber(GetMoney())
+    if current == nil then return session end
+
+    session.initialized = true
+    session.startMoney = current
+    session.lastMoney = current
+    session.earned = 0
+    session.spent = 0
+    return session
+end
+
+function ns.UpdateInfoBarMoneySession()
+    local data = ns.EnsureInfoBarMoneySession()
+    if not data.initialized or type(GetMoney) ~= "function" then return data end
+
+    local current = tonumber(GetMoney())
+    if current == nil then return data end
+
+    local delta = current - (tonumber(data.lastMoney) or current)
+    if delta > 0 then
+        data.earned = (tonumber(data.earned) or 0) + delta
+    elseif delta < 0 then
+        data.spent = (tonumber(data.spent) or 0) - delta
+    end
+    data.lastMoney = current
+    return data
+end
+end
+
+local function ColorLatency(latency)
+    latency = tonumber(latency or 0) or 0
+    if latency < 250 then return "|cff0CD809" .. latency .. "|r" end
+    if latency < 500 then return "|cffE8DA0F" .. latency .. "|r" end
+    return "|cffD80909" .. latency .. "|r"
+end
+
+local function ColorFPS(fps)
+    fps = tonumber(fps or 0) or 0
+    if fps < 15 then return "|cffD80909" .. fps .. "|r" end
+    if fps < 30 then return "|cffE8DA0F" .. fps .. "|r" end
+    return "|cff0CD809" .. fps .. "|r"
+end
+
+local function ColorMythicPlusScore(score)
+    score = tonumber(score or 0) or 0
+    local color
+    if C_ChallengeMode and C_ChallengeMode.GetDungeonScoreRarityColor then
+        local ok, result = pcall(C_ChallengeMode.GetDungeonScoreRarityColor, score)
+        if ok then color = result end
+    end
+    if color and color.WrapTextInColorCode then return color:WrapTextInColorCode(tostring(score)) end
+    if color and color.GetRGB then
+        local r, g, b = color:GetRGB()
+        return string.format("|cff%02x%02x%02x%s|r", math.floor((r or 1) * 255), math.floor((g or 1) * 255), math.floor((b or 1) * 255), tostring(score))
+    end
+    return MyColor() .. tostring(score) .. "|r"
+end
+
+local function GetNetLatency()
+    if not GetNetStats then return 0, 0, 0 end
+    local _, _, home, world = GetNetStats()
+    home, world = home or 0, world or 0
+    return home, world, math.max(home, world)
+end
+
+local function GetMythicPlusScore()
+    if C_PlayerInfo and C_PlayerInfo.GetPlayerMythicPlusRatingSummary then
+        local ok, summary = pcall(C_PlayerInfo.GetPlayerMythicPlusRatingSummary, "player")
+        if ok and type(summary) == "table" then
+            return tonumber(summary.currentSeasonScore or summary.overallScore or summary.rating) or 0
+        end
+    end
+    return 0
+end
+
+local nextGuildRosterRequest = 0
+local function GetOnlineGuild()
+    if not IsInGuild or not IsInGuild() then return nil end
+    -- GUILD_ROSTER_UPDATE re-renders this text, so an unconditional roster
+    -- request here loops with that event. Pull at most once per minute; the
+    -- pushed event keeps the online count fresh in between.
+    if C_GuildInfo and C_GuildInfo.GuildRoster then
+        local now = (GetTime and GetTime()) or 0
+        if now >= nextGuildRosterRequest then
+            nextGuildRosterRequest = now + 60
+            pcall(C_GuildInfo.GuildRoster)
+        end
+    end
+    if GetNumGuildMembers then
+        local _, online, allOnline = GetNumGuildMembers()
+        return allOnline or online or 0
+    end
+    return 0
+end
+
+local function GetOnlineFriends()
+    local online = 0
+    if C_FriendList and C_FriendList.GetNumOnlineFriends then
+        local ok, count = pcall(C_FriendList.GetNumOnlineFriends)
+        if ok and count then online = online + count end
+    elseif GetNumFriends and GetFriendInfo then
+        local ok, count = pcall(GetNumFriends)
+        if ok and count then
+            for i = 1, count do
+                local okInfo, _, _, _, _, connected = pcall(GetFriendInfo, i)
+                if okInfo and connected then online = online + 1 end
+            end
+        end
+    end
+    if BNGetNumFriends then
+        local ok, _, bnetOnline = pcall(BNGetNumFriends)
+        if ok and bnetOnline then online = online + bnetOnline end
+    end
+    return online
+end
+
+local function GetBagFreeSlots()
+    local free = 0
+    local getFree = C_Container and C_Container.GetContainerNumFreeSlots or GetContainerNumFreeSlots
+    if not getFree then return 0 end
+    for bag = 0, NUM_BAG_SLOTS or 4 do
+        local ok, count = pcall(getFree, bag)
+        if ok and count then free = free + count end
+    end
+    -- Match the micro-menu bag badge so both counters report the same total.
+    local reagentBag = Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag
+    if reagentBag then
+        local ok, count = pcall(getFree, reagentBag)
+        if ok and count then free = free + count end
+    end
+    return free
+end
+
+local function GetDurabilityPercent()
+    return ns.GetEquippedDurabilityPercent and ns.GetEquippedDurabilityPercent() or nil
+end
+
+local function ColorDurability(percent)
+    percent = tonumber(percent or 0) or 0
+    if percent < 30 then return "|cffD80909" .. percent .. "%|r" end
+    if percent < 70 then return "|cffE8DA0F" .. percent .. "%|r" end
+    return "|cff0CD809" .. percent .. "%|r"
+end
+
+local function GetSpecText()
+    if not GetSpecialization or not GetSpecializationInfo then return (SPECIALIZATION or "Spec") .. ": " .. MyColor() .. (NONE or "None") .. "|r" end
+    local spec = GetSpecialization()
+    if spec and spec < 5 then
+        local _, name, _, icon = GetSpecializationInfo(spec)
+        if name then
+            local loot = GetLootSpecialization and GetLootSpecialization() or 0
+            if loot and loot ~= 0 and GetSpecializationInfoByID then
+                local lootIcon = select(4, GetSpecializationInfoByID(loot))
+                icon = lootIcon or icon
+            end
+            local iconText = icon and ("|T" .. icon .. ":12:16:0:0:50:50:4:46:4:46|t") or ""
+            return MyColor() .. name .. "|r" .. iconText
+        end
+    end
+    return (SPECIALIZATION or "Spec") .. ": " .. MyColor() .. (NONE or "None") .. "|r"
+end
+
+local function GetZoneTextColor()
+    local pvpType = C_PvP and C_PvP.GetZonePVPInfo and C_PvP.GetZonePVPInfo() or (GetZonePVPInfo and GetZonePVPInfo())
+    pvpType = pvpType or "neutral"
+    if pvpType == "sanctuary" then return 0.41, 0.8, 0.94 end
+    if pvpType == "arena" or pvpType == "hostile" or pvpType == "combat" then return 1, 0.1, 0.1 end
+    if pvpType == "friendly" then return 0.1, 1, 0.1 end
+    if pvpType == "contested" then return 1, 0.7, 0 end
+    return 1, 0.93, 0.76
+end
+
+local function GetCoords()
+    if not C_Map or not C_Map.GetBestMapForUnit or not C_Map.GetPlayerMapPosition then return nil end
+    local okMap, mapID = pcall(C_Map.GetBestMapForUnit, "player")
+    if not okMap or not mapID then return nil end
+    local okPos, pos = pcall(C_Map.GetPlayerMapPosition, mapID, "player")
+    if not okPos or not pos then return nil end
+    local x, y = pos:GetXY()
+    if not x or not y then return nil end
+    return x, y, mapID
+end
+
+local function FormatCoords(x, y)
+    if not x or not y then return "--" end
+    return string.format("%.1f, %.1f", x * 100, y * 100)
+end
+
+local function GetCurrentMapID()
+    if C_Map and C_Map.GetBestMapForUnit then
+        local ok, mapID = pcall(C_Map.GetBestMapForUnit, "player")
+        if ok and mapID then return mapID end
+    end
+end
+
+local function GetPhaseLikeID()
+    local instanceID
+    if GetInstanceInfo then
+        local ok, value = pcall(function() return select(8, GetInstanceInfo()) end)
+        if ok then instanceID = tonumber(value) end
+    end
+    if instanceID and instanceID > 0 then return instanceID, "instance" end
+    local mapID = GetCurrentMapID()
+    if mapID then return mapID, "map" end
+    return nil, nil
+end
+
+local function CreatePlayerWaypoint()
+    local x, y, mapID = GetCoords()
+    if not x or not y or not mapID then
+        if UIErrorsFrame and UIErrorsFrame.AddMessage then UIErrorsFrame:AddMessage("Current coordinates are unavailable.") end
+        return
+    end
+
+    local created
+    if C_Map and C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+        local ok, point = pcall(UiMapPoint.CreateFromCoordinates, mapID, x, y)
+        if ok and point then
+            local okSet = pcall(C_Map.SetUserWaypoint, point)
+            created = okSet and true or false
+            if created and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+                pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+            end
+        end
+    end
+
+    local zone = GetAreaText and GetAreaText() or ""
+    local coords = FormatCoords(x, y)
+    print(string.format("|cffffff00|Hworldmap:%d:%d:%d|h[|A:Waypoint-MapPin-ChatIcon:13:13:0:0|a %s: %s (%s)]|h|r", mapID, x * 10000, y * 10000, LT("My Position"), zone, coords))
+    if not created and UIErrorsFrame and UIErrorsFrame.AddMessage then
+        UIErrorsFrame:AddMessage(LT("Waypoint link created, but the map pin API is unavailable."))
+    end
+end
+
+
+local meetingStoneBrokerDesired
+local meetingStoneLDBCallbackRegistered
+local meetingStoneLDBCallbackTarget = {}
+local meetingStoneRefreshQueued
+
+local function Lib(name)
+    local libStub = _G.LibStub
+    if not libStub then return nil end
+
+    local ok, lib
+    -- Standard LibStub is a callable table, not a Lua function.  Some builds
+    -- also expose GetLibrary directly, so support both paths.
+    if type(libStub) == "table" and type(libStub.GetLibrary) == "function" then
+        ok, lib = pcall(libStub.GetLibrary, libStub, name, true)
+        if ok and lib then return lib end
+    end
+
+    if type(libStub) == "function" or type(getmetatable(libStub)) == "table" then
+        ok, lib = pcall(libStub, name, true)
+        if ok then return lib end
+    end
+
+    return nil
+end
+
+local function GetMeetingStoneEnv()
+    local ace = Lib("AceAddon-3.0")
+    local envLib = Lib("NetEaseEnv-1.0")
+    local ms
+
+    if ace and type(ace.GetAddon) == "function" then
+        ms = SafeReturn(ace.GetAddon, ace, "MeetingStone", true)
+    end
+
+    local envList = envLib and envLib._NSList
+    local env
+    if envList then
+        env = envList.MeetingStone or (ms and ms.baseName and envList[ms.baseName])
+
+        if not env and ms then
+            for _, candidate in pairs(envList) do
+                if type(candidate) == "table" then
+                    local addon = candidate.Addon
+                    if addon == ms or candidate.DataBroker or candidate.MainPanel then
+                        env = candidate
+                        break
+                    end
+                end
+            end
+        end
+
+        if not ms then
+            for _, candidate in pairs(envList) do
+                if type(candidate) == "table" then
+                    local addon = candidate.Addon
+                    if addon and (addon.name == "MeetingStone" or addon.baseName == "MeetingStone" or candidate.DataBroker) then
+                        ms = addon
+                        env = env or candidate
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if not ms and env and env.Addon then ms = env.Addon end
+    return ms, env, envList
+end
+
+local function QueueMeetingStoneRefresh()
+    if meetingStoneRefreshQueued then return end
+    if RefreshInfoBarItem and not IsAnyInfoBarItemEnabled("meetingstone") then return end
+    meetingStoneRefreshQueued = true
+    local function run()
+        meetingStoneRefreshQueued = nil
+        if RefreshInfoBarItem then
+            RefreshInfoBarItem("meetingstone")
+        elseif DB().isInfoBar == true and ns.RefreshInfoBars then
+            ns.RefreshInfoBars()
+        end
+    end
+    if C_Timer and C_Timer.After then C_Timer.After(0, run) else run() end
+end
+
+local function RegisterMeetingStoneLDBCallback()
+    if meetingStoneLDBCallbackRegistered then return end
+    local ldb = Lib("LibDataBroker-1.1")
+    if not ldb or type(ldb.RegisterCallback) ~= "function" then return end
+
+    local function onChanged(event, name, key, value, object)
+        -- LibDataBroker callback signature is:
+        -- event, name, key, value, object.
+        if name == "MeetingStone" and (not key or key == "text" or key == "flash" or key == "icon") then
+            QueueMeetingStoneRefresh()
+        end
+    end
+
+    local ok1 = pcall(ldb.RegisterCallback, meetingStoneLDBCallbackTarget, "LibDataBroker_AttributeChanged_MeetingStone", onChanged)
+    local ok2 = pcall(ldb.RegisterCallback, meetingStoneLDBCallbackTarget, "LibDataBroker_AttributeChanged_MeetingStone_text", onChanged)
+    meetingStoneLDBCallbackRegistered = ok1 or ok2
+end
+
+local function IsValidMeetingStoneDataBroker(candidate)
+    return type(candidate) == "table" and (candidate.BrokerObject or candidate.BrokerPanel or candidate.BrokerText or type(candidate.UpdateLabel) == "function")
+end
+
+local function GetMeetingStoneBroker()
+    RegisterMeetingStoneLDBCallback()
+
+    local ms, env, envList = GetMeetingStoneEnv()
+    local dataBroker = env and env.DataBroker
+
+    if not IsValidMeetingStoneDataBroker(dataBroker) then dataBroker = nil end
+
+    if not dataBroker and ms and type(ms.GetModule) == "function" then
+        local module = SafeReturn(ms.GetModule, ms, "DataBroker", true)
+        if IsValidMeetingStoneDataBroker(module) then dataBroker = module end
+    end
+
+    if not dataBroker and ms and type(ms.modules) == "table" then
+        local module = ms.modules.DataBroker or ms.modules["DataBroker"]
+        if IsValidMeetingStoneDataBroker(module) then dataBroker = module end
+    end
+
+    if not dataBroker and envList then
+        for _, candidateEnv in pairs(envList) do
+            local module = type(candidateEnv) == "table" and candidateEnv.DataBroker
+            if IsValidMeetingStoneDataBroker(module) then
+                dataBroker = module
+                env = env or candidateEnv
+                break
+            end
+        end
+    end
+
+    local panel = dataBroker and dataBroker.BrokerPanel
+    local brokerObject = dataBroker and dataBroker.BrokerObject
+
+    local ldb = Lib("LibDataBroker-1.1")
+    if ldb and type(ldb.GetDataObjectByName) == "function" then
+        local ldbObject = SafeReturn(ldb.GetDataObjectByName, ldb, "MeetingStone")
+        if ldbObject then brokerObject = ldbObject end
+    end
+
+    if panel and (type(panel) ~= "table" or not panel.GetObjectType) then panel = nil end
+    return panel, dataBroker, ms, env, brokerObject
+end
+local function RestoreMeetingStoneBroker()
+    -- QFXSystemBar owns the MeetingStone floating-panel save/restore logic
+    -- (its .toc dependency guarantees the main module loaded first), so the
+    -- micro-menu MeetingStone button and the info-bar MeetingStone item can
+    -- never fight over the same floating panel state.
+    if ns.SyncMeetingStoneFloatingPanel then
+        ns.SyncMeetingStoneFloatingPanel()
+    end
+end
+
+local function HideMeetingStoneFloatingPanel()
+    -- QFXSystemBar owns the hiding logic too (see RestoreMeetingStoneBroker).
+    if ns.HideMeetingStoneFloatingPanel then
+        return ns.HideMeetingStoneFloatingPanel()
+    end
+    return false
+end
+
+local function CallMeetingStoneBrokerClick(owner, button)
+    local _, _, _, _, brokerObject = GetMeetingStoneBroker()
+    if brokerObject and type(brokerObject.OnClick) == "function" then
+        return SafeCall(brokerObject.OnClick, owner or UIParent, button or "LeftButton")
+    end
+    return false
+end
+
+local function ToggleMeetingStoneFallback(button, owner)
+    local genericText = ns.GetPremadeAddonInfoBarText and ns.GetPremadeAddonInfoBarText()
+    if genericText then
+        if ns.EnsureMeetingStoneBridgeLoaded then ns.EnsureMeetingStoneBridgeLoaded() end
+        if ns.ToggleMeetingStone then
+            ns.ToggleMeetingStone(owner, button)
+            return true
+        end
+    end
+
+    if CallMeetingStoneBrokerClick(owner, button) then return true end
+
+    local panel, _, ms, env = GetMeetingStoneBroker()
+    if panel and panel.GetScript then
+        local script = panel:GetScript("OnMouseUp") or panel:GetScript("OnClick")
+        if script and SafeCall(script, panel, button or "LeftButton") then return true end
+    end
+    if panel and panel.Click and SafeCall(panel.Click, panel, button or "LeftButton") then return true end
+
+    if ms then
+        for _, method in ipairs({ "Toggle", "Open", "Show", "ToggleModule" }) do
+            if type(ms[method]) == "function" and SafeCall(ms[method], ms) then return true end
+        end
+    end
+
+    local mainPanel = env and env.MainPanel
+    if mainPanel and mainPanel.IsShown and mainPanel.Show and mainPanel.Hide then
+        if mainPanel:IsShown() then SafeCall(mainPanel.Hide, mainPanel) else SafeCall(mainPanel.Show, mainPanel) end
+        return true
+    end
+
+    if SlashCmdList and SlashCmdList.MeetingStone then
+        if SafeCall(SlashCmdList.MeetingStone) then return true end
+    end
+
+    if UIErrorsFrame and UIErrorsFrame.AddMessage then
+        UIErrorsFrame:AddMessage(LT("MeetingStone is not loaded."))
+    end
+    return false
+end
+
+local function GetPremadeLauncherDisplayName()
+    local name = ns.GetPremadeAddonDisplayName and ns.GetPremadeAddonDisplayName()
+    if type(name) ~= "string" or name == "" or name == "MeetingStone" or name == "Meeting Stone" then
+        return LT("MeetingStone")
+    end
+    return name
+end
+
+local professionInfoBar = {}
+do
+    local ARCHAEOLOGY_SKILL_LINE_ID = 794
+
+    local function GetProfessionEntry(bookIndex)
+        if not bookIndex or type(GetProfessionInfo) ~= "function" then return nil end
+        local name, icon, rank, maxRank, numSpells, spellOffset, skillLineID = GetProfessionInfo(bookIndex)
+        if not name and not skillLineID then return nil end
+        return {
+            bookIndex = bookIndex,
+            name = name or LT("Profession"),
+            icon = icon,
+            rank = rank,
+            maxRank = maxRank,
+            numSpells = numSpells,
+            spellOffset = spellOffset,
+            skillLineID = skillLineID,
+        }
+    end
+
+    local function AddProfessionEntry(entries, bookIndex)
+        local entry = GetProfessionEntry(bookIndex)
+        if entry then entries[#entries + 1] = entry end
+    end
+
+    function professionInfoBar.GetEntries(secondary)
+        local entries = {}
+        if type(GetProfessions) ~= "function" then return entries end
+        local primary1, primary2, archaeology, fishing, cooking = GetProfessions()
+        if secondary then
+            AddProfessionEntry(entries, cooking)
+            AddProfessionEntry(entries, fishing)
+            AddProfessionEntry(entries, archaeology)
+        else
+            AddProfessionEntry(entries, primary1)
+            AddProfessionEntry(entries, primary2)
+        end
+        return entries
+    end
+
+    local function CastProfessionOpener(entry)
+        if not entry or not entry.bookIndex then return false end
+        local spellBook = C_SpellBook
+        local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player
+        if not spellBook or not bank or type(spellBook.GetSpellBookItemInfo) ~= "function" then return false end
+        for offset = 1, tonumber(entry.numSpells) or 0 do
+            local slot = offset + (tonumber(entry.spellOffset) or 0)
+            local info = spellBook.GetSpellBookItemInfo(slot, bank)
+            if info and info.spellID and not info.isPassive then
+                if type(spellBook.CastSpellBookItem) == "function" and SafeCall(spellBook.CastSpellBookItem, slot, bank) then return true end
+                if type(CastSpellByID) == "function" and SafeCall(CastSpellByID, info.spellID) then return true end
+            end
+        end
+        return false
+    end
+
+    local function OpenProfessionEntry(entry)
+        if not entry or not entry.skillLineID then return false end
+        if type(InCombatLockdown) == "function" and InCombatLockdown() then return false end
+
+        if entry.skillLineID == ARCHAEOLOGY_SKILL_LINE_ID and CastProfessionOpener(entry) then return true end
+
+        if C_TradeSkillUI and type(C_TradeSkillUI.OpenTradeSkill) == "function" then
+            local current = type(C_TradeSkillUI.GetBaseProfessionInfo) == "function" and C_TradeSkillUI.GetBaseProfessionInfo()
+            if current and current.professionID == entry.skillLineID and ProfessionsFrame and ProfessionsFrame:IsShown() then
+                if type(C_TradeSkillUI.CloseTradeSkill) == "function" then
+                    return SafeCall(C_TradeSkillUI.CloseTradeSkill)
+                end
+                if type(HideUIPanel) == "function" then return SafeCall(HideUIPanel, ProfessionsFrame) end
+            end
+            if SafeCall(C_TradeSkillUI.OpenTradeSkill, entry.skillLineID) then return true end
+        end
+
+        return CastProfessionOpener(entry)
+    end
+
+    function professionInfoBar.HandleClick(secondary, button)
+        if type(GetProfessions) ~= "function" then return end
+        local primary1, primary2, archaeology, fishing, cooking = GetProfessions()
+        local bookIndex
+        if secondary then
+            if button == "LeftButton" then bookIndex = cooking
+            elseif button == "RightButton" then bookIndex = fishing
+            elseif button == "MiddleButton" then bookIndex = archaeology
+            end
+        elseif button == "LeftButton" then
+            bookIndex = primary1
+        elseif button == "RightButton" then
+            bookIndex = primary2
+        end
+        OpenProfessionEntry(GetProfessionEntry(bookIndex))
+    end
+end
+
+local function GetTimeText()
+    local useLocal = GetCVarBool and GetCVarBool("timeMgrUseLocalTime")
+    local hour, minute
+    if useLocal then
+        hour, minute = tonumber(date("%H")), tonumber(date("%M"))
+    elseif GetGameTime then
+        hour, minute = GetGameTime()
+    else
+        hour, minute = tonumber(date("%H")), tonumber(date("%M"))
+    end
+
+    if GetCVarBool and not GetCVarBool("timeMgrUseMilitaryTime") then
+        local suffix = hour < 12 and "AM" or "PM"
+        local display = hour % 12
+        if display == 0 then display = 12 end
+        return string.format("%d:%02d%s", display, minute or 0, MyColor() .. suffix .. "|r")
+    end
+    return string.format("%02d:%02d", hour or 0, minute or 0)
+end
+
+
+
+function ns.InfoBarReadSoundCVar(name, fallback)
+    local value
+    if C_CVar and C_CVar.GetCVar then
+        value = SafeReturn(C_CVar.GetCVar, name)
+    elseif GetCVar then
+        value = SafeReturn(GetCVar, name)
+    end
+    local numberValue = tonumber(value)
+    if numberValue ~= nil then return numberValue end
+    return fallback
+end
+
+function ns.InfoBarWriteSoundCVar(name, value)
+    value = tostring(value)
+    if C_CVar and C_CVar.SetCVar then
+        if SafeCall(C_CVar.SetCVar, name, value) then return true end
+    end
+    if SetCVar then return SafeCall(SetCVar, name, value) end
+    return false
+end
+
+function ns.IsInfoBarMasterSoundMuted()
+    local enabled = ns.InfoBarReadSoundCVar(VOLUME_MUTE_CVAR, 1)
+    return enabled ~= nil and enabled <= 0
+end
+
+function ns.SetInfoBarMasterSoundMuted(muted)
+    ns.InfoBarWriteSoundCVar(VOLUME_MUTE_CVAR, muted and 0 or 1)
+end
+
+function ns.GetInfoBarMasterVolumePercent()
+    local raw = ns.InfoBarReadSoundCVar(VOLUME_MASTER_CVAR, 1) or 1
+    raw = math.max(0, math.min(1, raw))
+    return math.floor(raw * 100 + 0.5)
+end
+
+function ns.SetInfoBarMasterVolumePercent(percent)
+    percent = math.max(0, math.min(100, tonumber(percent) or 0))
+    ns.InfoBarWriteSoundCVar(VOLUME_MASTER_CVAR, percent / 100)
+    if percent > 0 and ns.IsInfoBarMasterSoundMuted() then ns.SetInfoBarMasterSoundMuted(false) end
+end
+
+local function ReadAdvancedCombatLogState()
+    if C_CVar and C_CVar.GetCVarBool then
+        local ok, value = pcall(C_CVar.GetCVarBool, ADVANCED_COMBAT_LOG_CVAR)
+        if ok and value ~= nil then return value and true or false end
+    end
+    if GetCVarBool then
+        local ok, value = pcall(GetCVarBool, ADVANCED_COMBAT_LOG_CVAR)
+        if ok and value ~= nil then return value and true or false end
+    end
+
+    local value
+    if C_CVar and C_CVar.GetCVar then
+        value = SafeReturn(C_CVar.GetCVar, ADVANCED_COMBAT_LOG_CVAR)
+    elseif GetCVar then
+        value = SafeReturn(GetCVar, ADVANCED_COMBAT_LOG_CVAR)
+    end
+    return value == true or value == 1 or value == "1" or value == "true"
+end
+
+local function WriteAdvancedCombatLogState(enabled)
+    local value = enabled and "1" or "0"
+    local ok
+    if C_CVar and C_CVar.SetCVar then ok = SafeCall(C_CVar.SetCVar, ADVANCED_COMBAT_LOG_CVAR, value) end
+    if not ok and SetCVar then ok = SafeCall(SetCVar, ADVANCED_COMBAT_LOG_CVAR, value) end
+    if RefreshInfoBarItem then RefreshInfoBarItem("combatlog") end
+    return ok
+end
+
+function ns.RefreshInfoBarVolumePanel()
+    local panel = ns.infoBarVolumePanel
+    if not panel or not panel.slider then return end
+    ns.infoBarVolumeSliderInternalUpdate = true
+    panel.slider:SetValue(ns.GetInfoBarMasterVolumePercent())
+    ns.infoBarVolumeSliderInternalUpdate = nil
+    if panel.title then panel.title:SetText(LT("Master Volume")) end
+    if panel.status then
+        local state = ns.IsInfoBarMasterSoundMuted() and LT("Muted") or (ns.GetInfoBarMasterVolumePercent() .. "%")
+        panel.status:SetText(state)
+    end
+    local sliderName = panel.slider:GetName()
+    if sliderName then
+        local label = _G[sliderName .. "Text"]
+        local low = _G[sliderName .. "Low"]
+        local high = _G[sliderName .. "High"]
+        -- The panel title and status already explain the control. Hiding the
+        -- stock horizontal labels keeps the vertical slider clean.
+        if label then label:SetText("") end
+        if low then low:SetText("") end
+        if high then high:SetText("") end
+    end
+end
+
+function ns.EnsureInfoBarVolumePanel()
+    if ns.infoBarVolumePanel then return ns.infoBarVolumePanel end
+
+    local template = BackdropTemplateMixin and "BackdropTemplate" or nil
+    local panel = CreateFrame("Frame", "QFXSystemBarVolumePanel", UIParent, template)
+    ns.infoBarVolumePanel = panel
+    panel:SetSize(82, 194)
+    panel:SetFrameStrata("DIALOG")
+    panel:EnableMouse(true)
+    if panel.SetClampedToScreen then panel:SetClampedToScreen(true) end
+    panel:Hide()
+    if panel.SetBackdrop then
+        panel:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = 1,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        })
+        panel:SetBackdropColor(0.05, 0.05, 0.05, 0.92)
+        panel:SetBackdropBorderColor(0.25, 0.55, 0.9, 0.85)
+    end
+
+    panel.title = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    panel.title:SetPoint("TOP", panel, "TOP", 0, -8)
+    panel.title:SetJustifyH("CENTER")
+
+    panel.status = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    panel.status:SetPoint("BOTTOM", panel, "BOTTOM", 0, 8)
+    panel.status:SetJustifyH("CENTER")
+
+    local slider = CreateFrame("Slider", "QFXSystemBarMasterVolumeSlider", panel, "OptionsSliderTemplate")
+    slider:SetOrientation("VERTICAL")
+    slider:SetSize(22, 126)
+    slider:SetPoint("TOP", panel.title, "BOTTOM", 0, -13)
+    slider:SetMinMaxValues(0, 100)
+    slider:SetValueStep(1)
+    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
+    slider:SetScript("OnValueChanged", function(_, value)
+        if ns.infoBarVolumeSliderInternalUpdate then return end
+        local rounded = math.floor((tonumber(value) or 0) + 0.5)
+        ns.SetInfoBarMasterVolumePercent(rounded)
+        if panel.status then panel.status:SetText(rounded .. "%") end
+        if RefreshInfoBarItem then RefreshInfoBarItem("volume") end
+    end)
+    panel.slider = slider
+
+    if UISpecialFrames then table.insert(UISpecialFrames, "QFXSystemBarVolumePanel") end
+    ns.RefreshInfoBarVolumePanel()
+    ApplyInfoBarVolumePanelSkin()
+    return panel
+end
+
+local function AnchorInfoBarVolumePanel(panel, owner)
+    panel:ClearAllPoints()
+    if owner and owner.GetCenter and UIParent and UIParent.GetCenter then
+        local ownerX = owner:GetCenter()
+        local uiX = UIParent:GetCenter()
+        if ownerX and uiX and ownerX > uiX then
+            panel:SetPoint("RIGHT", owner, "LEFT", -8, 0)
+        else
+            panel:SetPoint("LEFT", owner, "RIGHT", 8, 0)
+        end
+    else
+        panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
+end
+
+function ns.ToggleInfoBarVolumePanel(owner)
+    local panel = ns.EnsureInfoBarVolumePanel()
+    if panel:IsShown() then panel:Hide(); return end
+    ns.RefreshInfoBarVolumePanel()
+    AnchorInfoBarVolumePanel(panel, owner)
+    panel:Show()
+end
+
+function ns.ToggleInfoBarMasterMute()
+    ns.SetInfoBarMasterSoundMuted(not ns.IsInfoBarMasterSoundMuted())
+    ns.RefreshInfoBarVolumePanel()
+    if RefreshInfoBarItem then RefreshInfoBarItem("volume") end
+end
+
+local tooltipByID
+local ShowSystemTooltip
+local ShowGoldTooltip
+local ShowSimpleInfoBarTooltip
+local HideTooltipTicker
+
+do
+local addonInfo = {}
+local addonListBuilt
+local lastMemoryScan, lastCPUScan
+local cachedMemoryTotal, cachedCPUTotal = 0, 0
+
+local function BuildAddonList()
+    if addonListBuilt then return end
+    addonListBuilt = true
+    wipe(addonInfo)
+    local addons = C_AddOns
+    local num = addons and addons.GetNumAddOns and addons.GetNumAddOns() or 0
+    for i = 1, num do
+        local name, title, _, loadable = addons.GetAddOnInfo(i)
+        if loadable then addonInfo[#addonInfo + 1] = { index = i, name = name, title = title or name, memory = 0, cpu = 0 } end
+    end
+end
+
+local function IsAddonLoaded(index)
+    if C_AddOns and C_AddOns.IsAddOnLoaded then return C_AddOns.IsAddOnLoaded(index) end
+    -- _G lookup on purpose: a plain IsAddOnLoaded here would resolve to this
+    -- local function and recurse forever on clients without C_AddOns.
+    if _G.IsAddOnLoaded then return _G.IsAddOnLoaded(index) end
+    return false
+end
+
+local function SortByMemory(a, b)
+    if a.memory == b.memory then return tostring(a.title) < tostring(b.title) end
+    return a.memory > b.memory
+end
+
+local function SortByCPU(a, b)
+    if a.cpu == b.cpu then return tostring(a.title) < tostring(b.title) end
+    return a.cpu > b.cpu
+end
+
+local function UpdateAddonMemory()
+    BuildAddonList()
+    local now = GetTime and GetTime() or 0
+    if lastMemoryScan and now - lastMemoryScan < 30 then
+        table.sort(addonInfo, SortByMemory)
+        return cachedMemoryTotal
+    end
+    lastMemoryScan = now
+    local updateMemory = UpdateAddOnMemoryUsage or (C_AddOns and C_AddOns.UpdateAddOnMemoryUsage)
+    local getMemory = GetAddOnMemoryUsage or (C_AddOns and C_AddOns.GetAddOnMemoryUsage)
+    if updateMemory then pcall(updateMemory) end
+    local total = 0
+    for _, data in ipairs(addonInfo) do
+        if IsAddonLoaded(data.index) and getMemory then
+            data.memory = getMemory(data.index) or 0
+            total = total + data.memory
+        else
+            data.memory = 0
+        end
+    end
+    table.sort(addonInfo, SortByMemory)
+    cachedMemoryTotal = total
+    return total
+end
+
+local function UpdateAddonCPU()
+    BuildAddonList()
+    local now = GetTime and GetTime() or 0
+    if lastCPUScan and now - lastCPUScan < 3 then
+        table.sort(addonInfo, SortByCPU)
+        return cachedCPUTotal
+    end
+    lastCPUScan = now
+    local updateCPU = UpdateAddOnCPUUsage or (C_AddOns and C_AddOns.UpdateAddOnCPUUsage)
+    local getCPU = GetAddOnCPUUsage or (C_AddOns and C_AddOns.GetAddOnCPUUsage)
+    if updateCPU then pcall(updateCPU) end
+    local total = 0
+    for _, data in ipairs(addonInfo) do
+        if IsAddonLoaded(data.index) and getCPU then
+            data.cpu = getCPU(data.index) or 0
+            total = total + data.cpu
+        else
+            data.cpu = 0
+        end
+    end
+    table.sort(addonInfo, SortByCPU)
+    cachedCPUTotal = total
+    return total
+end
+
+local function SetTooltipOwner(owner)
+    local y
+    if owner and owner.GetCenter then
+        local _, centerY = owner:GetCenter()
+        y = centerY
+    end
+    local screenHeight = (UIParent and UIParent.GetHeight and UIParent:GetHeight()) or GetScreenHeight() or 768
+    local showAbove = not y or y <= screenHeight / 2
+    GameTooltip:SetOwner(owner, "ANCHOR_NONE")
+    GameTooltip:ClearAllPoints()
+    if showAbove then
+        GameTooltip:SetPoint("BOTTOM", owner, "TOP", 0, 8)
+    else
+        GameTooltip:SetPoint("TOP", owner, "BOTTOM", 0, -8)
+    end
+end
+
+HideTooltipTicker = function(owner)
+    if owner and owner ~= tooltipTickerOwner then return end
+    if tooltipTicker then
+        tooltipTicker:Cancel()
+        tooltipTicker = nil
+    end
+    tooltipTickerOwner = nil
+end
+
+local SIMPLE_INFOBAR_TOOLTIPS = {
+    mrt = { name = "MRT", left = "MRT" },
+    mdt = { name = "MDT", left = "MDT" },
+    guild = { name = "Guild", left = "Open Guild" },
+    friend = { name = "Friends", left = "Open Friends" },
+    meetingstone = { name = GetPremadeLauncherDisplayName, left = GetPremadeLauncherDisplayName },
+    zone = { name = "Location", left = "Open World Map", right = "Create Waypoint" },
+    coords = { name = "Coordinates", left = "Open World Map", right = "Create Waypoint" },
+    phase = { name = "Phase ID", left = "Print ID" },
+    spec = {
+        name = "Specialization",
+        left = function() return LT("Choose") .. " " .. LT("Talents") end,
+        right = "Change Loot Specialization",
+    },
+    ilvl = { name = "Item Level", left = "Open Character" },
+    mplus = { name = "Mythic+ Score", left = "Open Group Finder" },
+    dura = { name = "Durability", left = "Open Character" },
+    gold = {
+        name = "Gold",
+        left = function() return showSlots and "Open Bags" or "Open Currency" end,
+        right = "Toggle Bag Slots",
+    },
+    volume = { name = "Volume", left = "Open Volume Slider", right = "Toggle Mute" },
+    combatlog = { name = "Advanced Combat Log", left = "Turn On", right = "Turn Off" },
+    time = { name = "Time", left = "Open Calendar", right = "Open Clock" },
+}
+
+local function ResolveInfoBarTooltipText(value)
+    if type(value) == "function" then
+        local ok, result = pcall(value)
+        if ok and result then return LT(tostring(result)) end
+        return nil
+    end
+    if value ~= nil then return LT(tostring(value)) end
+    return nil
+end
+
+local function ProfessionIconText(entry, size)
+    if not entry or not entry.icon then return nil end
+    size = math.max(10, math.floor(tonumber(size) or 14))
+    -- Trim the transparent native edge so the visible artwork remains clear
+    -- at the requested inline size.
+    return string.format("|T%s:%d:%d:0:0:64:64:4:60:4:60|t", tostring(entry.icon), size, size)
+end
+
+function professionInfoBar.GetText(secondary, size)
+    local icons = {}
+    for _, entry in ipairs(professionInfoBar.GetEntries(secondary)) do
+        local icon = ProfessionIconText(entry, size)
+        if icon then icons[#icons + 1] = icon end
+    end
+    if #icons == 0 then return LT("None") end
+    -- One space keeps the icons visually separated without wasting the width
+    -- that previously caused the third secondary-profession icon to clip.
+    return table.concat(icons, " ")
+end
+
+function ns.GetInfoBarProfessionPreviewText(id)
+    if id == "profession" then return professionInfoBar.GetText(false, INFOBAR_ICON_SIZE) end
+    if id == "secondaryprofession" then return professionInfoBar.GetText(true, INFOBAR_ICON_SIZE) end
+    return nil
+end
+
+local function ShowProfessionInfoBarTooltip(owner, secondary)
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(LT(secondary and "Secondary Professions" or "Primary Professions"), 0, .6, 1)
+
+    local entries = professionInfoBar.GetEntries(secondary)
+    if #entries == 0 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(LT("None"), .65, .65, .65)
+    else
+        GameTooltip:AddLine(" ")
+        for index, entry in ipairs(entries) do
+            local mouseText
+            if secondary then
+                if entry.skillLineID == 185 then mouseText = LeftButtonText()
+                elseif entry.skillLineID == 356 then mouseText = RightButtonText()
+                elseif entry.skillLineID == 794 then mouseText = MiddleButtonText()
+                end
+            elseif index == 1 then
+                mouseText = LeftButtonText()
+            elseif index == 2 then
+                mouseText = RightButtonText()
+            end
+            local icon = ProfessionIconText(entry, 16) or ""
+            GameTooltip:AddLine((mouseText or "") .. icon .. " " .. (entry.name or ""), .6, .8, 1)
+        end
+    end
+    GameTooltip:Show()
+end
+
+local function ShowMountInfoBarTooltip(owner)
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(LT("Mount"), 0, .6, 1)
+    GameTooltip:AddLine(" ")
+    local db = DB()
+    for _, side in ipairs(MOUNT_SIDE_SETTINGS) do
+        local value = tostring(db[side.dbKey] or side.defaultValue or "none")
+        local mouseIcon = side.button == "LeftButton" and LeftButtonText()
+            or side.button == "MiddleButton" and MiddleButtonText()
+            or RightButtonText()
+        local icon = MountIconMarkup(value, 14)
+        local line = mouseIcon .. (icon and (icon .. " ") or "") .. GetMountActionName(value)
+        GameTooltip:AddLine(line, .6, .8, 1)
+    end
+    GameTooltip:Show()
+end
+
+local function FormatSignedMoney(value)
+    value = tonumber(value) or 0
+    if value > 0 then return "|cff55ff55+|r" .. FormatMoney(value, true) end
+    if value < 0 then return "|cffff5555-|r" .. FormatMoney(-value, true) end
+    return FormatMoney(0, true)
+end
+
+ShowSimpleInfoBarTooltip = function(owner, id)
+    local data = SIMPLE_INFOBAR_TOOLTIPS[id]
+    if not data then return end
+
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(ResolveInfoBarTooltipText(data.name) or LT(id), 0, .6, 1)
+
+    local left = ResolveInfoBarTooltipText(data.left)
+    local right = ResolveInfoBarTooltipText(data.right)
+    if left or right then GameTooltip:AddLine(" ") end
+    if left then GameTooltip:AddLine(LeftButtonText() .. left, .6, .8, 1) end
+    if right then GameTooltip:AddLine(RightButtonText() .. right, .6, .8, 1) end
+
+    GameTooltip:Show()
+end
+
+ShowSystemTooltip = function(owner)
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+
+    local fps = math.floor((GetFramerate and GetFramerate() or 0) + 0.5)
+    local home, world, latency = GetNetLatency()
+    GameTooltip:AddDoubleLine("FPS", ColorFPS(fps), 0, .6, 1, 1, 1, 1)
+    GameTooltip:AddDoubleLine(LT("Home Latency"), ColorLatency(home) .. " ms", .6, .8, 1, 1, 1, 1)
+    GameTooltip:AddDoubleLine(LT("World Latency"), ColorLatency(world) .. " ms", .6, .8, 1, 1, 1, 1)
+    GameTooltip:AddLine(" ")
+
+    local scriptProfile = GetCVarBool and GetCVarBool("scriptProfile")
+    local showCPUData = showCPU and scriptProfile
+    local total = showCPUData and UpdateAddonCPU() or UpdateAddonMemory()
+    local titleValue = showCPUData and string.format("%.3f ms", total / math.max(1, (GetTime and GetTime() or 0) - loginTime)) or FormatMemory(total)
+    GameTooltip:AddDoubleLine(LT("System"), titleValue, 0, .6, 1, .6, .8, 1)
+    GameTooltip:AddLine(" ")
+
+    local shown = 0
+    local expanded = IsShiftKeyDown and IsShiftKeyDown()
+    local maxShown = expanded and math.huge or MAX_TOOLTIP_ADDONS
+    if showCPUData then
+        local passed = math.max(1, (GetTime and GetTime() or 0) - loginTime)
+        for _, data in ipairs(addonInfo) do
+            if IsAddonLoaded(data.index) then
+                shown = shown + 1
+                if shown <= maxShown then
+                    GameTooltip:AddDoubleLine(data.title, string.format("%.3f ms", (data.cpu or 0) / passed), 1, 1, 1, .6, .8, 1)
+                end
+            end
+        end
+    else
+        for _, data in ipairs(addonInfo) do
+            if IsAddonLoaded(data.index) then
+                shown = shown + 1
+                if shown <= maxShown then
+                    GameTooltip:AddDoubleLine(data.title, FormatMemory(data.memory), 1, 1, 1, .6, .8, 1)
+                end
+            end
+        end
+    end
+    if shown > MAX_TOOLTIP_ADDONS and not expanded then
+        GameTooltip:AddDoubleLine(LF("%d Hidden", shown - MAX_TOOLTIP_ADDONS), LT("Hold Shift"), .6, .8, 1, .6, .8, 1)
+    end
+
+    GameTooltip:AddDoubleLine(" ", LineString())
+    GameTooltip:AddDoubleLine(" ", LeftButtonText() .. LT("Collect Memory") .. " ", 1, 1, 1, .6, .8, 1)
+    if scriptProfile then GameTooltip:AddDoubleLine(" ", RightButtonText() .. LT("CPU / Memory") .. " ", 1, 1, 1, .6, .8, 1) end
+    GameTooltip:AddDoubleLine(" ", MiddleButtonText() .. LT("CPU Usage") .. ": " .. (scriptProfile and "|cff55ff55" .. LT("ON") .. "|r" or "|cffff5555" .. LT("OFF") .. "|r") .. " ", 1, 1, 1, .6, .8, 1)
+    GameTooltip:Show()
+end
+
+ShowGoldTooltip = function(owner)
+    local data = ns.UpdateInfoBarMoneySession and ns.UpdateInfoBarMoneySession() or nil
+    local earned = data and tonumber(data.earned) or 0
+    local spent = data and tonumber(data.spent) or 0
+    local net = earned - spent
+
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(MONEY or LT("Money"), 0, .6, 1)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddDoubleLine(CHARACTER or LT("Character"), FormatMoney(GetMoney and GetMoney() or 0, true), .6, .8, 1, 1, 1, 1)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddDoubleLine(LT("Session Earned"), FormatSignedMoney(earned), .35, 1, .35, 1, 1, 1)
+    GameTooltip:AddDoubleLine(LT("Session Spent"), spent > 0 and ("|cffff5555-|r" .. FormatMoney(spent, true)) or FormatMoney(0, true), 1, .35, .35, 1, 1, 1)
+    GameTooltip:AddDoubleLine(LT("Session Net"), FormatSignedMoney(net), .6, .8, 1, 1, 1, 1)
+    GameTooltip:AddDoubleLine(" ", LineString())
+    GameTooltip:AddDoubleLine(" ", LeftButtonText() .. (CURRENCY or LT("Currency")) .. " ", 1, 1, 1, .6, .8, 1)
+    GameTooltip:AddDoubleLine(" ", RightButtonText() .. (BAGSLOTTEXT or BAGS or LT("Bags")) .. " ", 1, 1, 1, .6, .8, 1)
+    GameTooltip:Show()
+end
+
+local raidLockoutState = {
+    entries = {},
+    lastUpdate = 0,
+    requestPending = false,
+    owner = nil,
+}
+local RAID_LOCKOUT_CACHE_SECONDS = 60
+local MAX_RAID_LOCKOUT_LINES = 12
+
+local function FormatRaidResetTime(seconds)
+    seconds = math.max(0, tonumber(seconds) or 0)
+    if SecondsToTime then
+        local ok, value = pcall(SecondsToTime, seconds, true, false, 2)
+        if ok and type(value) == "string" and value ~= "" then return value end
+    end
+    local days = math.floor(seconds / 86400)
+    local hours = math.floor((seconds % 86400) / 3600)
+    if days > 0 then return string.format("%dd %dh", days, hours) end
+    local minutes = math.max(1, math.floor((seconds % 3600) / 60))
+    if hours > 0 then return string.format("%dh %dm", hours, minutes) end
+    return string.format("%dm", minutes)
+end
+
+local function SortRaidLockouts(a, b)
+    if a.name == b.name then return tostring(a.difficultyName or "") < tostring(b.difficultyName or "") end
+    return tostring(a.name or "") < tostring(b.name or "")
+end
+
+local function UpdateRaidLockoutCache()
+    wipe(raidLockoutState.entries)
+    local count = GetNumSavedInstances and tonumber(GetNumSavedInstances()) or 0
+    for index = 1, count do
+        local name, _, reset, difficultyID, locked, extended, _, isRaid, _, difficultyName, numEncounters, encounterProgress = GetSavedInstanceInfo(index)
+        reset = tonumber(reset) or 0
+        if isRaid and locked and reset > 0 then
+            raidLockoutState.entries[#raidLockoutState.entries + 1] = {
+                name = name or LT("Unknown"),
+                reset = reset,
+                difficultyID = tonumber(difficultyID) or 0,
+                difficultyName = difficultyName,
+                total = tonumber(numEncounters) or 0,
+                progress = tonumber(encounterProgress) or 0,
+                extended = extended == true,
+            }
+        end
+    end
+    table.sort(raidLockoutState.entries, SortRaidLockouts)
+    raidLockoutState.lastUpdate = GetTime and GetTime() or 0
+    raidLockoutState.requestPending = false
+end
+
+local function RequestRaidLockoutInfo()
+    if type(RequestRaidInfo) ~= "function" then return end
+    local now = GetTime and GetTime() or 0
+    if raidLockoutState.requestPending then return end
+    if raidLockoutState.lastUpdate > 0 and (now - raidLockoutState.lastUpdate) < RAID_LOCKOUT_CACHE_SECONDS then return end
+
+    raidLockoutState.requestPending = true
+    local ok = pcall(RequestRaidInfo)
+    if not ok then raidLockoutState.requestPending = false; return end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(5, function() raidLockoutState.requestPending = false end)
+    end
+end
+
+function ns.HandleInfoBarInstanceInfoUpdate()
+    UpdateRaidLockoutCache()
+    local owner = raidLockoutState.owner
+    if owner and owner.id == "time" and owner:IsShown() and owner:IsMouseOver() and GameTooltip:IsOwned(owner) and ns.ShowInfoBarTimeTooltip then
+        ns.ShowInfoBarTimeTooltip(owner)
+    end
+end
+
+function ns.ClearInfoBarTimeTooltipOwner(owner)
+    if raidLockoutState.owner == owner then raidLockoutState.owner = nil end
+end
+
+function ns.ShowInfoBarTimeTooltip(owner)
+    raidLockoutState.owner = owner
+    SetTooltipOwner(owner)
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(TIME_LABEL or LT("Time"), 0, .6, 1)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddDoubleLine(LOCAL_TIME_LABEL or LT("Local Time"), date("%H:%M"), .6, .8, 1, 1, 1, 1)
+    if GetGameTime then
+        local h, m = GetGameTime()
+        GameTooltip:AddDoubleLine(SERVER_TIME_LABEL or LT("Server Time"), string.format("%02d:%02d", h or 0, m or 0), .6, .8, 1, 1, 1, 1)
+    end
+
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine(LT("Raid Lockouts"), 0, .6, 1)
+    if raidLockoutState.lastUpdate <= 0 then
+        GameTooltip:AddLine(LT("Loading raid lockouts..."), .6, .6, .6)
+    elseif #raidLockoutState.entries == 0 then
+        GameTooltip:AddLine(LT("No active raid lockouts."), .6, .6, .6)
+    else
+        local shown = math.min(#raidLockoutState.entries, MAX_RAID_LOCKOUT_LINES)
+        for index = 1, shown do
+            local data = raidLockoutState.entries[index]
+            local left = data.name
+            if data.difficultyName and data.difficultyName ~= "" then
+                left = string.format("%s |cff888888(%s)|r", left, data.difficultyName)
+            end
+            if data.extended then left = left .. " |cffffaa00" .. LT("Extended") .. "|r" end
+            local progress = string.format("%d/%d", data.progress, data.total)
+            local reset = FormatRaidResetTime(data.reset)
+            GameTooltip:AddDoubleLine(left, progress .. "  |cff888888" .. reset .. "|r", 1, 1, 1, .6, .8, 1)
+        end
+        if #raidLockoutState.entries > shown then
+            GameTooltip:AddLine(LF("%d Hidden", #raidLockoutState.entries - shown), .6, .6, .6)
+        end
+    end
+
+    GameTooltip:AddDoubleLine(" ", LineString())
+    GameTooltip:AddDoubleLine(" ", LeftButtonText() .. (CALENDAR or LT("Calendar")) .. " ", 1, 1, 1, .6, .8, 1)
+    GameTooltip:AddDoubleLine(" ", RightButtonText() .. (TIMEMANAGER_TITLE or LT("Clock")) .. " ", 1, 1, 1, .6, .8, 1)
+    GameTooltip:Show()
+    RequestRaidLockoutInfo()
+end
+
+tooltipByID = {
+    greatvault = ns.ShowGreatVaultTooltip,
+    mrt = function(owner) ShowSimpleInfoBarTooltip(owner, "mrt") end,
+    mdt = function(owner) ShowSimpleInfoBarTooltip(owner, "mdt") end,
+    crest_adventurer = function(owner) if ns.ShowCrestTooltip then ns.ShowCrestTooltip(owner, 3442, "Adventurer's Crest") end end,
+    crest_veteran = function(owner) if ns.ShowCrestTooltip then ns.ShowCrestTooltip(owner, 3443, "Veteran's Crest") end end,
+    crest_champion = function(owner) if ns.ShowCrestTooltip then ns.ShowCrestTooltip(owner, 3444, "Champion's Crest") end end,
+    crest_hero = function(owner) if ns.ShowCrestTooltip then ns.ShowCrestTooltip(owner, 3445, "Hero's Crest") end end,
+    crest_mythic = function(owner) if ns.ShowCrestTooltip then ns.ShowCrestTooltip(owner, 3446, "Mythic Crest") end end,
+    guild = function(owner) ShowSimpleInfoBarTooltip(owner, "guild") end,
+    friend = function(owner) ShowSimpleInfoBarTooltip(owner, "friend") end,
+    meetingstone = function(owner) ShowSimpleInfoBarTooltip(owner, "meetingstone") end,
+    profession = function(owner) ShowProfessionInfoBarTooltip(owner, false) end,
+    secondaryprofession = function(owner) ShowProfessionInfoBarTooltip(owner, true) end,
+    mount = ShowMountInfoBarTooltip,
+    fps = ShowSystemTooltip,
+    combatlog = function(owner) ShowSimpleInfoBarTooltip(owner, "combatlog") end,
+    zone = function(owner) ShowSimpleInfoBarTooltip(owner, "zone") end,
+    coords = function(owner) ShowSimpleInfoBarTooltip(owner, "coords") end,
+    phase = function(owner) ShowSimpleInfoBarTooltip(owner, "phase") end,
+    spec = function(owner) ShowSimpleInfoBarTooltip(owner, "spec") end,
+    ilvl = function(owner) ShowSimpleInfoBarTooltip(owner, "ilvl") end,
+    mplus = function(owner) ShowSimpleInfoBarTooltip(owner, "mplus") end,
+    dura = function(owner) ShowSimpleInfoBarTooltip(owner, "dura") end,
+    gold = function(owner) if ns.ShowGoldTooltip then ns.ShowGoldTooltip(owner) end end,
+    volume = function(owner) ShowSimpleInfoBarTooltip(owner, "volume") end,
+    time = function(owner) ns.ShowInfoBarTimeTooltip(owner) end,
+}
+end
+
+
+local ToggleLootSpecMenu
+local ToggleTalentLoadoutMenu
+
+do
+local lootSpecDropDown
+local talentLoadoutDropDown
+
+local function RefreshInfoBarsSoon()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.05, function() if ns.RefreshInfoBars then ns.RefreshInfoBars() end end)
+    elseif ns.RefreshInfoBars then
+        ns.RefreshInfoBars()
+    end
+end
+
+local function SelectLootSpec(_, index)
+    index = tonumber(index) or 0
+    if SetLootSpecialization then pcall(SetLootSpecialization, index) end
+    if CloseDropDownMenus then CloseDropDownMenus() end
+    RefreshInfoBarsSoon()
+end
+
+local function IsLootSpecSelected(index)
+    return (GetLootSpecialization and GetLootSpecialization() or 0) == (tonumber(index) or 0)
+end
+
+local function CheckLootSpec(self)
+    return IsLootSpecSelected(self and self.arg1)
+end
+
+local function SafeFormat(fmt, value)
+    if type(fmt) == "string" then
+        local ok, result = pcall(string.format, fmt, value)
+        if ok and result then return result end
+    end
+    return "Default (" .. tostring(value or NONE or "None") .. ")"
+end
+
+local function BuildLootSpecMenu()
+    local menu = {
+        { text = SELECT_LOOT_SPECIALIZATION or LT("Loot Specialization"), isTitle = true, notCheckable = true },
+    }
+    local currentSpec = GetSpecialization and GetSpecialization()
+    local currentName = currentSpec and GetSpecializationInfo and select(2, GetSpecializationInfo(currentSpec)) or (NONE or "None")
+    menu[#menu + 1] = {
+        text = SafeFormat(LOOT_SPECIALIZATION_DEFAULT or "Default (%s)", currentName),
+        arg1 = 0,
+        func = SelectLootSpec,
+        checked = CheckLootSpec,
+    }
+
+    local numSpecs = GetNumSpecializations and GetNumSpecializations() or 4
+    for i = 1, numSpecs do
+        if GetSpecializationInfo then
+            local id, name, _, icon = GetSpecializationInfo(i)
+            if id and name then
+                menu[#menu + 1] = {
+                    text = name,
+                    icon = icon,
+                    arg1 = id,
+                    func = SelectLootSpec,
+                    checked = CheckLootSpec,
+                }
+            end
+        end
+    end
+    return menu
+end
+
+local function GetCurrentSpecID()
+    if PlayerUtil and PlayerUtil.GetCurrentSpecID then
+        local ok, specID = pcall(PlayerUtil.GetCurrentSpecID)
+        if ok and specID then return specID end
+    end
+    local specIndex = GetSpecialization and GetSpecialization()
+    return specIndex and GetSpecializationInfo and select(1, GetSpecializationInfo(specIndex)) or nil
+end
+
+local function GetTalentLoadouts()
+    local entries = {}
+    local specID = GetCurrentSpecID()
+    if not specID or not C_ClassTalents or not C_ClassTalents.GetConfigIDsBySpecID then
+        return entries, specID, nil
+    end
+
+    local ok, configIDs = pcall(C_ClassTalents.GetConfigIDsBySpecID, specID)
+    if not ok or type(configIDs) ~= "table" then return entries, specID, nil end
+    for index, configID in ipairs(configIDs) do
+        local info
+        if C_Traits and C_Traits.GetConfigInfo then
+            local infoOK, result = pcall(C_Traits.GetConfigInfo, configID)
+            if infoOK then info = result end
+        end
+        if info and type(info.name) == "string" and info.name ~= "" then
+            entries[#entries + 1] = {
+                index = index,
+                configID = configID,
+                name = info.name,
+                specID = specID,
+            }
+        end
+    end
+
+    local selectedID
+    if C_ClassTalents.GetLastSelectedSavedConfigID then
+        local selectedOK, result = pcall(C_ClassTalents.GetLastSelectedSavedConfigID, specID)
+        if selectedOK then selectedID = result end
+    end
+    return entries, specID, selectedID
+end
+
+local function OpenTalentFrame()
+    if BlockInCombat() then return end
+    if SafeClickNativeButton("PlayerSpellsMicroButton", "SpellbookMicroButton", "TalentMicroButton") then return end
+    if PlayerSpellsUtil and PlayerSpellsUtil.ToggleClassTalentOrSpecFrame then
+        SafeCall(PlayerSpellsUtil.ToggleClassTalentOrSpecFrame)
+    elseif ToggleTalentFrame then
+        SafeCall(ToggleTalentFrame)
+    end
+end
+
+local function SelectTalentLoadout(_, entry)
+    if type(entry) ~= "table" or not entry.index then return end
+    if BlockInCombat() then return end
+
+    local switched = false
+    if C_ClassTalents and C_ClassTalents.SwitchToLoadoutByIndex then
+        switched = pcall(C_ClassTalents.SwitchToLoadoutByIndex, entry.index)
+    elseif ClassTalentHelper and ClassTalentHelper.SwitchToLoadoutByIndex then
+        switched = pcall(ClassTalentHelper.SwitchToLoadoutByIndex, entry.index)
+    elseif C_ClassTalents and C_ClassTalents.LoadConfig and entry.configID then
+        local ok = pcall(C_ClassTalents.LoadConfig, entry.configID, true)
+        switched = ok
+        if ok and entry.specID and C_ClassTalents.UpdateLastSelectedSavedConfigID then
+            pcall(C_ClassTalents.UpdateLastSelectedSavedConfigID, entry.specID, entry.configID)
+        end
+    end
+
+    if CloseDropDownMenus then CloseDropDownMenus() end
+    if switched then RefreshInfoBarsSoon() end
+end
+
+local function BuildTalentLoadoutMenu()
+    local title = _G.TALENT_LOADOUTS or _G.TALENTS or LT("Talents")
+    local entries, _, selectedID = GetTalentLoadouts()
+    local menu = {
+        { text = title, isTitle = true, notCheckable = true },
+    }
+    if #entries == 0 then
+        menu[#menu + 1] = { text = NONE or LT("None"), disabled = true, notCheckable = true }
+    else
+        for _, entry in ipairs(entries) do
+            menu[#menu + 1] = {
+                text = entry.name,
+                arg1 = entry,
+                func = SelectTalentLoadout,
+                checked = entry.configID == selectedID,
+            }
+        end
+    end
+    menu[#menu + 1] = { text = LT("Open Talents"), func = OpenTalentFrame, notCheckable = true }
+    return menu
+end
+
+ToggleTalentLoadoutMenu = function(owner)
+    owner = owner or UIParent
+    if GameTooltip then GameTooltip:Hide() end
+
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        local ok = pcall(MenuUtil.CreateContextMenu, owner, function(_, rootDescription)
+            rootDescription:CreateTitle(_G.TALENT_LOADOUTS or _G.TALENTS or LT("Talents"))
+            local entries, _, selectedID = GetTalentLoadouts()
+            if #entries == 0 then
+                local none = rootDescription:CreateButton(NONE or LT("None"), function() end)
+                if none and none.SetEnabled then none:SetEnabled(false) end
+            else
+                for _, entry in ipairs(entries) do
+                    local loadout = entry
+                    rootDescription:CreateRadio(
+                        loadout.name,
+                        function() return loadout.configID == selectedID end,
+                        function() SelectTalentLoadout(nil, loadout) end
+                    )
+                end
+            end
+            rootDescription:CreateButton(LT("Open Talents"), OpenTalentFrame)
+        end)
+        if ok then return end
+    end
+
+    if not EasyMenu and C_AddOns and C_AddOns.LoadAddOn then
+        pcall(C_AddOns.LoadAddOn, "Blizzard_UIDropDownMenu")
+    elseif not EasyMenu and LoadAddOn then
+        pcall(LoadAddOn, "Blizzard_UIDropDownMenu")
+    end
+    if not EasyMenu then return end
+
+    if not talentLoadoutDropDown then
+        local ok, frame = pcall(CreateFrame, "Frame", "QFXSystemBarInfoBarTalentLoadoutDropDown", UIParent, "UIDropDownMenuTemplate")
+        if ok then talentLoadoutDropDown = frame end
+    end
+    if talentLoadoutDropDown then
+        EasyMenu(BuildTalentLoadoutMenu(), talentLoadoutDropDown, owner, -80, 100, "MENU", 1)
+    end
+end
+
+ToggleLootSpecMenu = function(owner)
+    owner = owner or UIParent
+    if GameTooltip then GameTooltip:Hide() end
+
+    -- Retail's newer context-menu API is preferred when available.  The old
+    -- EasyMenu path is kept as a fallback for clients/addon loads that still
+    -- expose UIDropDownMenu.
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        local ok = pcall(MenuUtil.CreateContextMenu, owner, function(_, rootDescription)
+            rootDescription:CreateTitle(SELECT_LOOT_SPECIALIZATION or LT("Loot Specialization"))
+
+            local currentSpec = GetSpecialization and GetSpecialization()
+            local currentName = currentSpec and GetSpecializationInfo and select(2, GetSpecializationInfo(currentSpec)) or (NONE or "None")
+            rootDescription:CreateRadio(
+                SafeFormat(LOOT_SPECIALIZATION_DEFAULT or "Default (%s)", currentName),
+                function() return IsLootSpecSelected(0) end,
+                function() SelectLootSpec(nil, 0) end
+            )
+
+            local numSpecs = GetNumSpecializations and GetNumSpecializations() or 4
+            for i = 1, numSpecs do
+                if GetSpecializationInfo then
+                    local id, name = GetSpecializationInfo(i)
+                    if id and name then
+                        rootDescription:CreateRadio(
+                            name,
+                            function() return IsLootSpecSelected(id) end,
+                            function() SelectLootSpec(nil, id) end
+                        )
+                    end
+                end
+            end
+        end)
+        if ok then return end
+    end
+
+    if not EasyMenu and C_AddOns and C_AddOns.LoadAddOn then
+        pcall(C_AddOns.LoadAddOn, "Blizzard_UIDropDownMenu")
+    elseif not EasyMenu and LoadAddOn then
+        pcall(LoadAddOn, "Blizzard_UIDropDownMenu")
+    end
+    if not EasyMenu then return end
+
+    if not lootSpecDropDown then
+        local ok, frame = pcall(CreateFrame, "Frame", "QFXSystemBarInfoBarLootSpecDropDown", UIParent, "UIDropDownMenuTemplate")
+        if ok then lootSpecDropDown = frame end
+    end
+    if lootSpecDropDown then
+        EasyMenu(BuildLootSpecMenu(), lootSpecDropDown, owner, -80, 100, "MENU", 1)
+    end
+end
+end
+
+local function HandleClick(id, button, owner)
+    if id == "greatvault" then
+        if ns.ToggleGreatVault then ns.ToggleGreatVault(owner, button) end
+    elseif id == "mrt" then
+        if ns.ToggleMRT then ns.ToggleMRT(owner, button) end
+    elseif id == "mdt" then
+        if ns.ToggleMDT then ns.ToggleMDT(owner, button) end
+    elseif id == "guild" then
+        if button ~= "LeftButton" or not IsInGuild or not IsInGuild() then return end
+        if SafeClickNativeButton("GuildMicroButton") then return end
+        LoadBlizzardAddon("Blizzard_Communities")
+        if CommunitiesFrame and ToggleFrame then SafeCall(ToggleFrame, CommunitiesFrame) end
+    elseif id == "friend" then
+        if button ~= "LeftButton" then return end
+        if SafeClickNativeButton("FriendsMicroButton", "SocialMicroButton", "QuickJoinToastButton") then return end
+        if ToggleFriendsFrame then SafeCall(ToggleFriendsFrame) end
+    elseif id == "meetingstone" then
+        if button ~= "LeftButton" then return end
+        ToggleMeetingStoneFallback(button, owner)
+    elseif id == "profession" then
+        professionInfoBar.HandleClick(false, button)
+    elseif id == "secondaryprofession" then
+        professionInfoBar.HandleClick(true, button)
+    elseif id == "mount" then
+        SummonConfiguredMount(button)
+    elseif id == "fps" then
+        if button == "LeftButton" then
+            local before = collectgarbage("count")
+            collectgarbage("collect")
+            local freed = math.max(0, before - collectgarbage("count"))
+            print(string.format("|cff66C6FFQFXSystemBar:|r %s %s.", COLLECT_MEMORY or LT("Collect Memory"), FormatMemory(freed)))
+            if owner then ShowSystemTooltip(owner) end
+        elseif button == "RightButton" then
+            if GetCVarBool and GetCVarBool("scriptProfile") then
+                showCPU = not showCPU
+                if owner then ShowSystemTooltip(owner) end
+            end
+        elseif button == "MiddleButton" and GetCVarBool and SetCVar then
+            SetCVar("scriptProfile", GetCVarBool("scriptProfile") and 0 or 1)
+            if StaticPopupDialogs and StaticPopupDialogs["QFXSYSTEMBAR_RELOAD_REQUIRED"] then StaticPopupDialogs["QFXSYSTEMBAR_RELOAD_REQUIRED"].text = LT("CPU profiling requires a UI reload to fully apply.") end
+            StaticPopup_Show("QFXSYSTEMBAR_RELOAD_REQUIRED")
+        end
+    elseif id == "combatlog" then
+        if button == "LeftButton" then
+            WriteAdvancedCombatLogState(true)
+        elseif button == "RightButton" then
+            WriteAdvancedCombatLogState(false)
+        end
+        if owner then ShowSimpleInfoBarTooltip(owner, "combatlog") end
+    elseif id == "zone" then
+        if button == "LeftButton" then
+            if BlockInCombat() then return end
+            if ToggleWorldMap then SafeCall(ToggleWorldMap)
+            elseif WorldMapFrame and ToggleFrame then SafeCall(ToggleFrame, WorldMapFrame) end
+        elseif button == "RightButton" then
+            CreatePlayerWaypoint()
+        end
+    elseif id == "coords" then
+        if button == "LeftButton" then
+            if BlockInCombat() then return end
+            if ToggleWorldMap then SafeCall(ToggleWorldMap)
+            elseif WorldMapFrame and ToggleFrame then SafeCall(ToggleFrame, WorldMapFrame) end
+        elseif button == "RightButton" then
+            CreatePlayerWaypoint()
+        end
+    elseif id == "phase" then
+        if button == "LeftButton" then
+            local idValue, kind = GetPhaseLikeID()
+            print(LF("QFXSystemBar: Phase ID: %s (%s).", tostring(idValue or "--"), kind == "instance" and LT("Instance ID") or LT("Map ID")))
+        end
+    elseif id == "spec" then
+        if button == "LeftButton" then
+            ToggleTalentLoadoutMenu(owner)
+        elseif button == "RightButton" then
+            ToggleLootSpecMenu(owner)
+        end
+    elseif id == "ilvl" then
+        if button == "LeftButton" then
+            if SafeClickNativeButton("CharacterMicroButton") then return end
+            if BlockInCombat() then return end
+            if ToggleCharacter then SafeCall(ToggleCharacter, "PaperDollFrame") end
+        end
+    elseif id == "mplus" then
+        if button == "LeftButton" then
+            if SafeClickNativeButton("LFDMicroButton") then return end
+            if BlockInCombat() then return end
+            if PVEFrame_ToggleFrame then SafeCall(PVEFrame_ToggleFrame, "GroupFinderFrame")
+            elseif ToggleLFDParentFrame then SafeCall(ToggleLFDParentFrame)
+            elseif TogglePVEFrame then SafeCall(TogglePVEFrame) end
+        end
+    elseif id == "dura" then
+        if button == "LeftButton" then
+            if SafeClickNativeButton("CharacterMicroButton") then return end
+            if BlockInCombat() then return end
+            if ToggleCharacter then SafeCall(ToggleCharacter, "PaperDollFrame") end
+        end
+    elseif id == "gold" then
+        if button == "LeftButton" and IsControlKeyDown() then
+            if ns.ClearAccountGoldData then ns.ClearAccountGoldData() end
+            if ns.UpdateCurrentCharacterGold then ns.UpdateCurrentCharacterGold() end
+            if owner and ns.ShowGoldTooltip then ns.ShowGoldTooltip(owner) end
+            print("|cff33FF99QFX|r - |cffFF8800" .. LT("Account gold data cleared.") .. "|r")
+        elseif button == "RightButton" then
+            showSlots = not showSlots
+            RefreshInfoBarItem("gold")
+            if owner and ns.ShowGoldTooltip then ns.ShowGoldTooltip(owner) end
+        elseif button == "LeftButton" then
+            if showSlots then
+                if ToggleAllBags then SafeCall(ToggleAllBags) end
+            else
+                if BlockInCombat() then return end
+                if ToggleCharacter then SafeCall(ToggleCharacter, "TokenFrame") end
+            end
+        end
+    elseif id == "volume" then
+        if button == "LeftButton" then
+            ns.ToggleInfoBarVolumePanel(owner)
+        elseif button == "RightButton" then
+            ns.ToggleInfoBarMasterMute()
+        end
+    elseif id == "time" then
+        if button == "LeftButton" then
+            ToggleCalendarSafe()
+        elseif button == "RightButton" then
+            if ToggleTimeManager then SafeCall(ToggleTimeManager) end
+        end
+    end
+end
+
+local function GetSlot(slotKey)
+    return ns.InfoBarSlots and ns.InfoBarSlots[slotKey]
+end
+
+local function ClampNumber(value, minValue, maxValue, defaultValue)
+    value = tonumber(value)
+    if value == nil then value = defaultValue end
+    if minValue and value < minValue then value = minValue end
+    if maxValue and value > maxValue then value = maxValue end
+    return value
+end
+
+local function GetBarWidth(slotKey)
+    local slot = GetSlot(slotKey)
+    local default = (ns.defaults and slot and ns.defaults[slot.widthKey]) or DEFAULT_INFOBAR_WIDTH
+    return ClampNumber(slot and DB()[slot.widthKey], 260, 900, default)
+end
+
+local function GetBarHeight(slotKey)
+    local slot = GetSlot(slotKey)
+    local default = (ns.defaults and slot and ns.defaults[slot.heightKey]) or DEFAULT_INFOBAR_HEIGHT
+    return ClampNumber(slot and DB()[slot.heightKey], 12, 40, default)
+end
+
+local function GetInfoBarFontSize()
+    local default = (ns.defaults and ns.defaults.infoBarFontSize) or DEFAULT_INFOBAR_FONT_SIZE
+    return ClampNumber(DB().infoBarFontSize, 8, 20, default)
+end
+
+local VALID_LINE_STYLES = {
+    ["eui-unitframes"] = true,
+    ["eui-taskbar"] = true,
+}
+
+local VALID_LINE_POSITIONS = {
+    top = true,
+    bottom = true,
+    both = true,
+    hidden = true,
+}
+
+local LEGACY_LINE_POSITION = {
+    ["thin-bottom"] = "bottom",
+    ["thin-top"] = "top",
+    ["thin-both"] = "both",
+    ["outer-both"] = "both",
+    hidden = "hidden",
+}
+
+local LEGACY_LINE_STYLE = {
+    ["thin-bottom"] = "eui-unitframes",
+    ["thin-top"] = "eui-unitframes",
+    ["thin-both"] = "eui-unitframes",
+    ["outer-both"] = "eui-taskbar",
+    hidden = DEFAULT_INFOBAR_LINE_STYLE,
+}
+
+local function GetInfoBarLineThickness(slotKey)
+    local slot = GetSlot(slotKey)
+    local key = slot and slot.lineThicknessKey
+    local default = (ns.defaults and key and ns.defaults[key]) or DEFAULT_INFOBAR_LINE_THICKNESS
+    return ClampNumber(key and DB()[key], 1, 6, default)
+end
+
+local function GetInfoBarLineStyle(slotKey)
+    local slot = GetSlot(slotKey)
+    local key = slot and slot.lineStyleKey
+    local style = key and DB()[key]
+    if VALID_LINE_STYLES[style] then return style end
+    return (ns.defaults and key and ns.defaults[key]) or DEFAULT_INFOBAR_LINE_STYLE
+end
+
+local function GetInfoBarLinePosition(slotKey)
+    local slot = GetSlot(slotKey)
+    local key = slot and slot.linePositionKey
+    local pos = key and DB()[key]
+    if VALID_LINE_POSITIONS[pos] then return pos end
+    return (ns.defaults and key and ns.defaults[key]) or (slotKey == "right" and DEFAULT_INFOBAR_LINE_POSITION_RIGHT or DEFAULT_INFOBAR_LINE_POSITION_LEFT)
+end
+
+local function InsertMissingInfoBarItem(order, seen, id)
+    if seen[id] then return end
+
+    local index = INFOBAR_ITEM_INDEX[id] or (#INFOBAR_ITEM_ORDER + 1)
+    local insertAt = #order + 1
+    for i = #order, 1, -1 do
+        local existingIndex = INFOBAR_ITEM_INDEX[order[i]] or (#INFOBAR_ITEM_ORDER + 1)
+        if existingIndex < index then
+            insertAt = i + 1
+            break
+        end
+        insertAt = i
+    end
+
+    table.insert(order, insertAt, id)
+    seen[id] = true
+end
+
+local function NormalizeInfoBarOrder(order)
+    local seen, out = {}, {}
+    for _, rawID in ipairs(order or {}) do
+        local id = ns.NormalizeInfoBarItemID and ns.NormalizeInfoBarItemID(rawID) or rawID
+        if id and ns.InfoBarItems[id] and not seen[id] then
+            out[#out + 1] = id
+            seen[id] = true
+        end
+    end
+    for _, id in ipairs(INFOBAR_ITEM_ORDER) do
+        InsertMissingInfoBarItem(out, seen, id)
+    end
+    return out
+end
+
+function ns.MigrateInfoBarSavedVariables(db)
+    if type(db) ~= "table" then return end
+    for _, slot in pairs(ns.InfoBarSlots or {}) do
+        if type(slot) == "table" then
+            if type(db[slot.orderKey]) == "table" then
+                db[slot.orderKey] = NormalizeInfoBarOrder(db[slot.orderKey])
+            end
+            if type(db[slot.enabledKey]) == "table" then
+                NormalizeInfoBarEnabledMap(db[slot.enabledKey])
+            end
+        end
+    end
+end
+
+local infoBarDefaultsEnsured
+
+local function EnsureInfoBarDefaults()
+    local db = DB()
+    -- Migrations below are idempotent (they only fill missing fields and set
+    -- explicit one-shot migration markers in the DB), so running them once per
+    -- database instance is enough. GetOrderForSlot calls this on every layout
+    -- pass, and ns.RefreshInfoBars calls it again per refresh.
+    if infoBarDefaultsEnsured then return db end
+    infoBarDefaultsEnsured = true
+    if db.isInfoBar == nil then
+        db.isInfoBar = ns.defaults.isInfoBar == true
+    end
+    if db.infoBarEuiSkin == nil then
+        db.infoBarEuiSkin = ns.defaults.infoBarEuiSkin == true
+    end
+    if db.infoBarFadeStrength == nil then
+        db.infoBarFadeStrength = ClampNumber(db.infoBarLeftFadeStrength or db.infoBarRightFadeStrength, 0, 100, ns.defaults.infoBarFadeStrength or 50)
+    else
+        db.infoBarFadeStrength = ClampNumber(db.infoBarFadeStrength, 0, 100, ns.defaults.infoBarFadeStrength or 50)
+    end
+    if db.infoBarFontSize == nil then
+        db.infoBarFontSize = ns.defaults.infoBarFontSize or DEFAULT_INFOBAR_FONT_SIZE
+    else
+        db.infoBarFontSize = ClampNumber(db.infoBarFontSize, 8, 20, ns.defaults.infoBarFontSize or DEFAULT_INFOBAR_FONT_SIZE)
+    end
+    local legacyThickness = ClampNumber(db.infoBarLineThickness, 1, 6, ns.defaults.infoBarLineThickness or DEFAULT_INFOBAR_LINE_THICKNESS)
+    local legacyStyle = db.infoBarLineStyle
+    local legacyMappedStyle = LEGACY_LINE_STYLE[legacyStyle]
+    local legacyMappedPosition = LEGACY_LINE_POSITION[legacyStyle]
+
+    local upgradeDefaultLinePlacement = db.infoBarBothOutsideLineDefaultMigrated ~= true
+        and db.infoBarLeftLineStyle == "eui-taskbar"
+        and db.infoBarRightLineStyle == "eui-taskbar"
+        and (db.infoBarLeftLinePosition == nil or db.infoBarLeftLinePosition == "bottom")
+        and (db.infoBarRightLinePosition == nil or db.infoBarRightLinePosition == "top")
+
+    for slotKey, slot in pairs(ns.InfoBarSlots or {}) do
+        if db[slot.barEnabledKey] == nil then db[slot.barEnabledKey] = ns.defaults[slot.barEnabledKey] == true end
+        if db[slot.widthKey] == nil then db[slot.widthKey] = ns.defaults[slot.widthKey] or DEFAULT_INFOBAR_WIDTH end
+        if db[slot.heightKey] == nil then db[slot.heightKey] = ns.defaults[slot.heightKey] or DEFAULT_INFOBAR_HEIGHT end
+        if db[slot.fadeKey] == nil then db[slot.fadeKey] = ns.defaults[slot.fadeKey] or slot.defaultFade or "left" end
+        if slot.lineThicknessKey then
+            db[slot.lineThicknessKey] = ClampNumber(db[slot.lineThicknessKey], 1, 6, legacyThickness or ns.defaults[slot.lineThicknessKey] or DEFAULT_INFOBAR_LINE_THICKNESS)
+        end
+        if slot.lineStyleKey and db[slot.lineStyleKey] == "ndui" then
+            db[slot.lineStyleKey] = "eui-taskbar"
+        end
+        if slot.lineStyleKey and not VALID_LINE_STYLES[db[slot.lineStyleKey]] then
+            db[slot.lineStyleKey] = legacyMappedStyle or ns.defaults[slot.lineStyleKey] or DEFAULT_INFOBAR_LINE_STYLE
+        end
+        if slot.linePositionKey and not VALID_LINE_POSITIONS[db[slot.linePositionKey]] then
+            if legacyMappedPosition then
+                if legacyStyle == "thin-bottom" and slotKey == "right" then
+                    db[slot.linePositionKey] = "top"
+                else
+                    db[slot.linePositionKey] = legacyMappedPosition
+                end
+            else
+                db[slot.linePositionKey] = ns.defaults[slot.linePositionKey] or (slotKey == "right" and DEFAULT_INFOBAR_LINE_POSITION_RIGHT or DEFAULT_INFOBAR_LINE_POSITION_LEFT)
+            end
+        end
+        if db[slot.xKey] == nil then db[slot.xKey] = slot.defaultX or 0 end
+        if db[slot.yKey] == nil then db[slot.yKey] = slot.defaultY or 0 end
+        if db[slot.unlockedKey] == nil then db[slot.unlockedKey] = false end
+        if type(db[slot.orderKey]) ~= "table" then db[slot.orderKey] = CopyArray(ns.defaults[slot.orderKey] or INFOBAR_ITEM_ORDER) end
+        if type(db[slot.enabledKey]) ~= "table" then db[slot.enabledKey] = CopyMap(ns.defaults[slot.enabledKey] or slot.defaultItems or {}) end
+        NormalizeInfoBarEnabledMap(db[slot.enabledKey])
+
+        -- 1.7.81 default layout update: keep the default left info strip to
+        -- four items: Item Level / Mythic+ Score / FPS / Advanced Combat Log.
+        -- MeetingStone stays available, but is no longer enabled by default.
+        -- Only migrate exact previous default layouts, so custom layouts are
+        -- not overwritten.
+        if slotKey == "left" and db.infoBarLeftCombatLogDefaultMigrated ~= true then
+            local enabledItems = db[slot.enabledKey]
+            if type(enabledItems) == "table" then
+                local enabledCount = 0
+                for _, enabled in pairs(enabledItems) do if enabled == true then enabledCount = enabledCount + 1 end end
+                if enabledItems.ilvl == true and enabledItems.mplus == true and enabledItems.meetingstone == true then
+                    if enabledItems.fps == true and enabledCount == 4 and enabledItems.combatlog ~= true then
+                        enabledItems.meetingstone = nil
+                        enabledItems.combatlog = true
+                    elseif enabledItems.fps == true and enabledCount == 5 and enabledItems.combatlog == true then
+                        enabledItems.meetingstone = nil
+                    elseif enabledItems.combatlog == true and enabledCount == 4 and enabledItems.fps ~= true then
+                        enabledItems.meetingstone = nil
+                        enabledItems.fps = true
+                    end
+                end
+            end
+        end
+
+        -- 1.7.77 default layout update: keep the default right info strip to
+        -- four items and do not include Time by default. Only migrate exact
+        -- old default layouts, so custom layouts are not overwritten.
+        if slotKey == "right" and db.infoBarRightNoTimeDefaultMigrated ~= true then
+            local enabledItems = db[slot.enabledKey]
+            if type(enabledItems) == "table" then
+                local enabledCount = 0
+                for _, enabled in pairs(enabledItems) do if enabled == true then enabledCount = enabledCount + 1 end end
+                if enabledItems.spec == true and enabledItems.dura == true and enabledItems.gold == true then
+                    if enabledCount == 4 and enabledItems.time == true and enabledItems.volume ~= true then
+                        enabledItems.time = nil
+                        enabledItems.volume = true
+                    elseif enabledCount == 5 and enabledItems.time == true and enabledItems.volume == true then
+                        enabledItems.time = nil
+                    end
+                end
+            end
+        end
+
+        local out = NormalizeInfoBarOrder(db[slot.orderKey])
+        db[slot.orderKey] = out
+
+        local totalSpan = 0
+        local enabledItems = db[slot.enabledKey]
+        if type(enabledItems) == "table" then
+            for _, id in ipairs(out) do
+                if enabledItems[id] == true then
+                    local itemDef = ns.InfoBarItems[id]
+                    local span = (itemDef and itemDef.span) or 1
+                    if totalSpan + span <= MAX_INFOBAR_ITEMS_PER_BAR then totalSpan = totalSpan + span
+                    else enabledItems[id] = false
+                    end
+                end
+            end
+        end
+    end
+
+    -- 1.7.73 default line placement update: both info strips now show the
+    -- EUI Taskbar-style class rails on both outside edges by default. Migrate
+    -- only the previous default pair (left bottom / right top) so custom top,
+    -- bottom, both, or hidden choices are left alone.
+    if upgradeDefaultLinePlacement then
+        db.infoBarLeftLinePosition = "both"
+        db.infoBarRightLinePosition = "both"
+    end
+    db.infoBarBothOutsideLineDefaultMigrated = true
+    db.infoBarLeftCombatLogDefaultMigrated = true
+    db.infoBarRightNoTimeDefaultMigrated = true
+end
+
+local function GetOrderForSlot(slotKey)
+    EnsureInfoBarDefaults()
+    local slot = GetSlot(slotKey)
+    return slot and DB()[slot.orderKey] or INFOBAR_ITEM_ORDER
+end
+
+local function IsSlotEnabled(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return false end
+    return DB().isInfoBar == true and DB()[slot.barEnabledKey] == true
+end
+
+local function GetEnabledItemCount(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return 0 end
+    local enabled = DB()[slot.enabledKey]
+    if type(enabled) ~= "table" then return 0 end
+    -- 按 span 计数：纹章项目 span 0.4。
+    local totalSpan = 0
+    for _, id in ipairs(GetOrderForSlot(slotKey)) do
+        if enabled[id] == true then
+            local itemDef = ns.InfoBarItems[id]
+            totalSpan = totalSpan + ((itemDef and itemDef.span) or 1)
+        end
+    end
+    return totalSpan
+end
+
+local function EnforceInfoBarItemLimit(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return end
+    local enabled = DB()[slot.enabledKey]
+    if type(enabled) ~= "table" then return end
+
+    local totalSpan = 0
+    for _, id in ipairs(GetOrderForSlot(slotKey)) do
+        if enabled[id] == true then
+            local itemDef = ns.InfoBarItems[id]
+            local span = (itemDef and itemDef.span) or 1
+            if totalSpan + span <= MAX_INFOBAR_ITEMS_PER_BAR then
+                totalSpan = totalSpan + span
+            else
+                enabled[id] = false
+            end
+        end
+    end
+end
+
+local function IsItemEnabled(slotKey, id)
+    local slot = GetSlot(slotKey)
+    if not slot then return false end
+    local enabled = DB()[slot.enabledKey]
+    return type(enabled) == "table" and enabled[id] == true
+end
+
+IsAnyInfoBarItemEnabled = function(id)
+    if not id or DB().isInfoBar ~= true then return false end
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        if IsSlotEnabled(slotKey) and IsItemEnabled(slotKey, id) then return true end
+    end
+    return false
+end
+
+-- Shared by the main micro-menu module.  MeetingStone's own floating broker
+-- window must stay hidden not only when the micro-menu MeetingStone button is
+-- enabled, but also when the info bar is using MeetingStone as one of its
+-- visible data items.  This keeps /reload and fresh login from restoring the
+-- MeetingStone floating window behind the user's back.
+function ns.IsMeetingStoneInfoBarActive()
+    EnsureInfoBarDefaults()
+    return IsAnyInfoBarItemEnabled("meetingstone")
+end
+
+local function IsAnyInfoBarShown()
+    if DB().isInfoBar ~= true then return false end
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        if IsSlotEnabled(slotKey) and GetEnabledItemCount(slotKey) > 0 then return true end
+    end
+    return false
+end
+
+local function IsInfoBarEventNeeded(event)
+    if event == "PLAYER_ENTERING_WORLD" then return IsAnyInfoBarShown() end
+    if event == "ADDON_LOADED" then return IsAnyInfoBarItemEnabled("meetingstone") end
+    local filter = EVENT_ITEM_REFRESH[event]
+    if type(filter) ~= "table" then return false end
+    for id in pairs(filter) do
+        if IsAnyInfoBarItemEnabled(id) then return true end
+    end
+    return false
+end
+
+function ns.GetInfoBarEnabledCount(slotKey)
+    EnsureInfoBarDefaults()
+    return GetEnabledItemCount(slotKey)
+end
+
+function ns.SetInfoBarItemEnabled(slotKey, id, enabled)
+    local slot = GetSlot(slotKey)
+    if not slot or not id or not ns.InfoBarItems[id] then return false, MAX_INFOBAR_ITEMS_PER_BAR end
+    EnsureInfoBarDefaults()
+    local items = DB()[slot.enabledKey]
+    if type(items) ~= "table" then
+        items = {}
+        DB()[slot.enabledKey] = items
+    end
+
+    if enabled then
+        if items[id] ~= true then
+            local currentSpan = GetEnabledItemCount(slotKey)
+            local itemDef = ns.InfoBarItems[id]
+            local span = (itemDef and itemDef.span) or 1
+            if currentSpan + span > MAX_INFOBAR_ITEMS_PER_BAR then
+                return false, MAX_INFOBAR_ITEMS_PER_BAR
+            end
+        end
+        items[id] = true
+    else
+        items[id] = false
+    end
+
+    EnforceInfoBarItemLimit(slotKey)
+    ns.RefreshInfoBars()
+    return true, MAX_INFOBAR_ITEMS_PER_BAR
+end
+
+local StartInfoBarDrag, StopInfoBarDrag
+
+local function HideInfoBarItemTooltip(owner)
+    if owner.id == "greatvault" and ns.StopGreatVaultTooltip then ns.StopGreatVaultTooltip(owner) end
+    HideTooltipTicker(owner)
+    if owner.id == "time" and ns.ClearInfoBarTimeTooltipOwner then ns.ClearInfoBarTimeTooltipOwner(owner) end
+    if GameTooltip:IsOwned(owner) then GameTooltip:Hide() end
+end
+
+local function CreateTextModule(slotKey, id)
+    modules[slotKey] = modules[slotKey] or {}
+    if modules[slotKey][id] then return modules[slotKey][id] end
+
+    local btn = CreateFrame("Button", nil, UIParent)
+    btn:SetFrameStrata("LOW")
+    -- The button box is sized from the font (see GetInfoBarTextBoxHeight), so
+    -- the vertical hit insets stay small; clicking still covers the strip plus
+    -- the original padding.
+    btn:SetHitRectInsets(0, 0, -4, -4)
+    btn:RegisterForClicks("AnyUp")
+    btn:RegisterForDrag("LeftButton")
+    btn:EnableMouse(true)
+    if btn.SetClipsChildren then btn:SetClipsChildren(true) end
+    btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    btn.text:SetPoint("CENTER")
+    btn.text:SetJustifyH("CENTER")
+    if btn.text.SetJustifyV then btn.text:SetJustifyV("MIDDLE") end
+    if btn.text.SetWordWrap then btn.text:SetWordWrap(false) end
+    if btn.text.SetNonSpaceWrap then btn.text:SetNonSpaceWrap(false) end
+    if btn.text.SetMaxLines then btn.text:SetMaxLines(1) end
+    local fontPath, fontFlag = GetInfoBarTextFont()
+    local fontSize = GetInfoBarFontSize()
+    btn.text:SetFont(fontPath, fontSize, fontFlag or "")
+    btn.qfxInfoBarFontPath = fontPath
+    btn.qfxInfoBarFontFlag = fontFlag
+    btn.qfxInfoBarFontSize = fontSize
+    btn.id = id
+    btn.slotKey = slotKey
+
+    -- 纹章数字独立 FontString
+    if id and id:match("^crest_") then
+        btn.crestNumber = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        btn.crestNumber:SetFont(fontPath, fontSize, fontFlag or "")
+        btn.crestNumber:SetJustifyH("LEFT")
+        if btn.crestNumber.SetJustifyV then btn.crestNumber:SetJustifyV("MIDDLE") end
+        if btn.crestNumber.SetWordWrap then btn.crestNumber:SetWordWrap(false) end
+        if btn.crestNumber.SetMaxLines then btn.crestNumber:SetMaxLines(1) end
+        btn.crestNumber:Hide()
+    end
+
+    btn:SetScript("OnEnter", function(self)
+        local func = tooltipByID[self.id]
+        if func then
+            func(self)
+            if self.id == "fps" then
+                HideTooltipTicker()
+                tooltipTickerOwner = self
+                tooltipTicker = C_Timer and C_Timer.NewTicker and C_Timer.NewTicker(1, function()
+                    if not self:IsShown() or not self:IsMouseOver() or not GameTooltip:IsOwned(self) then
+                        HideInfoBarItemTooltip(self)
+                        return
+                    end
+                    func(self)
+                end)
+            end
+        end
+    end)
+    btn:SetScript("OnLeave", HideInfoBarItemTooltip)
+    btn:SetScript("OnHide", HideInfoBarItemTooltip)
+    btn:SetScript("OnDragStart", function(self)
+        if StartInfoBarDrag(self.slotKey) then
+            self.qfxInfoBarSuppressClick = true
+        end
+    end)
+    btn:SetScript("OnDragStop", function(self)
+        if self.qfxInfoBarSuppressClick then
+            StopInfoBarDrag(self.slotKey)
+        end
+    end)
+    btn:SetScript("OnMouseUp", function(self, button)
+        if self.qfxInfoBarSuppressClick then
+            self.qfxInfoBarSuppressClick = nil
+            return
+        end
+        HandleClick(self.id, button, self)
+    end)
+    modules[slotKey][id] = btn
+    return btn
+end
+
+local function SaveInfoBarPosition(slotKey, frame)
+    local slot = GetSlot(slotKey)
+    if not slot or not frame then return end
+
+    local uiLeft = UIParent:GetLeft() or 0
+    local uiRight = UIParent:GetRight() or (UIParent:GetWidth() or 0)
+    local uiTop = UIParent:GetTop() or (UIParent:GetHeight() or 0)
+    local uiBottom = UIParent:GetBottom() or 0
+
+    if slot.anchor == "TOPLEFT" then
+        DB()[slot.xKey] = math.floor(((frame:GetLeft() or uiLeft) - uiLeft) + .5)
+        DB()[slot.yKey] = math.floor(((frame:GetTop() or uiTop) - uiTop) + .5)
+    elseif slot.anchor == "BOTTOMLEFT" then
+        DB()[slot.xKey] = math.floor(((frame:GetLeft() or uiLeft) - uiLeft) + .5)
+        DB()[slot.yKey] = math.floor(((frame:GetBottom() or uiBottom) - uiBottom) + .5)
+    elseif slot.anchor == "BOTTOMRIGHT" then
+        DB()[slot.xKey] = math.floor(((frame:GetRight() or uiRight) - uiRight) + .5)
+        DB()[slot.yKey] = math.floor(((frame:GetBottom() or uiBottom) - uiBottom) + .5)
+    end
+end
+
+StartInfoBarDrag = function(slotKey)
+    local slot = GetSlot(slotKey)
+    local bar = bars[slotKey]
+    if not slot or not bar or DB()[slot.unlockedKey] ~= true then return false end
+    if bar.StartMoving then
+        bar:StartMoving()
+        return true
+    end
+    return false
+end
+
+StopInfoBarDrag = function(slotKey)
+    local bar = bars[slotKey]
+    if not bar then return end
+    if bar.StopMovingOrSizing then bar:StopMovingOrSizing() end
+    SaveInfoBarPosition(slotKey, bar)
+    ns.RefreshInfoBars()
+end
+
+local function ApplyGradient(tex, r, g, b, a1, a2, width, height)
+    if not tex then return end
+    tex:SetTexture("Interface\\Buttons\\WHITE8x8")
+    tex:SetSize(width, height)
+    if tex.SetGradient and CreateColor then
+        local ok = pcall(tex.SetGradient, tex, "Horizontal", CreateColor(r, g, b, a1), CreateColor(r, g, b, a2))
+        if not ok then tex:SetColorTexture(r, g, b, math.max(a1 or 0, a2 or 0)) end
+    elseif tex.SetGradientAlpha then
+        local ok = pcall(tex.SetGradientAlpha, tex, "HORIZONTAL", r, g, b, a1, r, g, b, a2)
+        if not ok then tex:SetColorTexture(r, g, b, math.max(a1 or 0, a2 or 0)) end
+    else
+        tex:SetColorTexture(r, g, b, math.max(a1 or 0, a2 or 0))
+    end
+end
+
+local function CreateBackground(name, slotKey)
+    local frame = CreateFrame("Frame", name, UIParent)
+    frame:Hide()
+    frame:SetFrameStrata("BACKGROUND")
+    frame.slotKey = slotKey
+    frame.body = frame:CreateTexture(nil, "BACKGROUND")
+    frame.body:SetPoint("CENTER")
+    -- QFX class accent rails.  The visual idea is a crisp class-colored rail
+    -- that can sit inside the info strip like a unit-frame texture edge, or
+    -- outside the strip for the legacy compact system-bar look.  The textures
+    -- are plain WHITE8x8 regions, not external artwork.
+    frame.topLine = frame:CreateTexture(nil, "BORDER")
+    frame.bottomLine = frame:CreateTexture(nil, "BORDER")
+    frame.topLineShadow = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+    frame.bottomLineShadow = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetClampedToScreen(true)
+    frame:SetScript("OnDragStart", function(self)
+        StartInfoBarDrag(self.slotKey)
+    end)
+    frame:SetScript("OnDragStop", function(self)
+        StopInfoBarDrag(self.slotKey)
+    end)
+    return frame
+end
+
+local function GetFadeStrength()
+    local default = (ns.defaults and ns.defaults.infoBarFadeStrength) or 50
+    return ClampNumber(DB().infoBarFadeStrength, 0, 100, default) / 100
+end
+
+local function GetFadeAlphas(slotKey)
+    local slot = GetSlot(slotKey)
+    local fade = slot and DB()[slot.fadeKey] or "left"
+    local strength = GetFadeStrength()
+    if fade == "right" then return 0, strength end
+    return strength, 0
+end
+
+local function ApplyBarPosition(slotKey)
+    local slot = GetSlot(slotKey)
+    local bar = bars[slotKey]
+    if not slot or not bar then return end
+    local x = DB()[slot.xKey] or slot.defaultX or 0
+    local y = DB()[slot.yKey] or slot.defaultY or 0
+    -- The line textures sit outside the frame body. Do not add automatic edge
+    -- padding here; users can fine-tune the unlocked position manually.
+    bar:ClearAllPoints()
+    bar:SetPoint(slot.anchor, UIParent, slot.anchor, x, y)
+end
+
+local function ResetLineTexture(tex)
+    if not tex then return end
+    tex:ClearAllPoints()
+    tex:SetTexture("Interface\\Buttons\\WHITE8x8")
+    tex:SetAlpha(1)
+    tex:Show()
+end
+
+local function HideLineTexture(tex)
+    if tex then tex:Hide() end
+end
+
+local function LayoutClassRail(bar, style, position, width, height, thickness)
+    if not bar then return end
+    local t = math.max(1, thickness or 1)
+    local shadowSize = math.max(t + 1, 2)
+
+    ResetLineTexture(bar.topLine)
+    ResetLineTexture(bar.bottomLine)
+    ResetLineTexture(bar.topLineShadow)
+    ResetLineTexture(bar.bottomLineShadow)
+
+    HideLineTexture(bar.topLine)
+    HideLineTexture(bar.bottomLine)
+    HideLineTexture(bar.topLineShadow)
+    HideLineTexture(bar.bottomLineShadow)
+
+    if position == "hidden" then return end
+
+    local mode = "inner"
+    local inset = 0
+    if style == "eui-taskbar" then
+        -- QFX uses the EUI taskbar idea as a short outside accent rail:
+        -- outside the info strip, but slightly inset from the two ends.
+        mode = "taskbar"
+        inset = 4
+    end
+
+    local function SetHorizontal(tex, target, edge, offY, leftInset, rightInset)
+        tex:SetPoint(edge .. "LEFT", target, edge .. "LEFT", leftInset or 0, offY or 0)
+        tex:SetPoint(edge .. "RIGHT", target, edge .. "RIGHT", -(rightInset or 0), offY or 0)
+    end
+
+    local function PlaceTop()
+        if mode == "taskbar" then
+            bar.topLine:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", inset, 0)
+            bar.topLine:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", -inset, 0)
+            bar.topLineShadow:SetPoint("BOTTOMLEFT", bar.topLine, "TOPLEFT", 0, 0)
+            bar.topLineShadow:SetPoint("BOTTOMRIGHT", bar.topLine, "TOPRIGHT", 0, 0)
+        else
+            SetHorizontal(bar.topLine, bar, "TOP", 0, inset, inset)
+            bar.topLineShadow:SetPoint("TOPLEFT", bar.topLine, "BOTTOMLEFT", 0, 0)
+            bar.topLineShadow:SetPoint("TOPRIGHT", bar.topLine, "BOTTOMRIGHT", 0, 0)
+        end
+        bar.topLine:SetHeight(t)
+        bar.topLineShadow:SetHeight(shadowSize)
+        bar.topLine:Show()
+        bar.topLineShadow:Show()
+    end
+
+    local function PlaceBottom()
+        if mode == "taskbar" then
+            bar.bottomLine:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", inset, 0)
+            bar.bottomLine:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", -inset, 0)
+            bar.bottomLineShadow:SetPoint("TOPLEFT", bar.bottomLine, "BOTTOMLEFT", 0, 0)
+            bar.bottomLineShadow:SetPoint("TOPRIGHT", bar.bottomLine, "BOTTOMRIGHT", 0, 0)
+        else
+            SetHorizontal(bar.bottomLine, bar, "BOTTOM", 0, inset, inset)
+            bar.bottomLineShadow:SetPoint("BOTTOMLEFT", bar.bottomLine, "TOPLEFT", 0, 0)
+            bar.bottomLineShadow:SetPoint("BOTTOMRIGHT", bar.bottomLine, "TOPRIGHT", 0, 0)
+        end
+        bar.bottomLine:SetHeight(t)
+        bar.bottomLineShadow:SetHeight(shadowSize)
+        bar.bottomLine:Show()
+        bar.bottomLineShadow:Show()
+    end
+
+    if position == "top" or position == "both" then PlaceTop() end
+    if position == "bottom" or position == "both" then PlaceBottom() end
+end
+
+local function UpdateBarVisual(slotKey)
+    local slot = GetSlot(slotKey)
+    local bar = bars[slotKey]
+    if not slot or not bar then return end
+    local width, height = GetBarWidth(slotKey), GetBarHeight(slotKey)
+    local startAlpha, endAlpha = GetFadeAlphas(slotKey)
+    local bodyR, bodyG, bodyB, r, g, b = ns.GetInfoBarSkinColors()
+    bar:SetSize(width, height)
+    ApplyBarPosition(slotKey)
+    if bar.body then bar.body:Show() end
+    ApplyGradient(bar.body, bodyR, bodyG, bodyB, startAlpha, endAlpha, width, height)
+    local lineThickness = GetInfoBarLineThickness(slotKey)
+    local lineStyle = GetInfoBarLineStyle(slotKey)
+    local linePosition = GetInfoBarLinePosition(slotKey)
+    LayoutClassRail(bar, lineStyle, linePosition, width, height, lineThickness)
+    ApplyGradient(bar.topLine, r, g, b, startAlpha, endAlpha, width, lineThickness)
+    ApplyGradient(bar.bottomLine, r, g, b, startAlpha, endAlpha, width, lineThickness)
+    ApplyGradient(bar.topLineShadow, 0, 0, 0, math.min(.28, startAlpha * .65), math.min(.28, endAlpha * .65), width, math.max(lineThickness + 1, 2))
+    ApplyGradient(bar.bottomLineShadow, 0, 0, 0, math.min(.28, startAlpha * .65), math.min(.28, endAlpha * .65), width, math.max(lineThickness + 1, 2))
+    local unlocked = DB()[slot.unlockedKey] == true
+    bar:SetMovable(unlocked)
+    bar:EnableMouse(unlocked)
+end
+
+local function ReleaseTexture(tex)
+    if not tex then return end
+    tex:SetTexture(nil)
+    tex:Hide()
+end
+
+local function ReleaseBarMaterials(bar)
+    if not bar then return end
+    ReleaseTexture(bar.body)
+    ReleaseTexture(bar.topLine)
+    ReleaseTexture(bar.bottomLine)
+    ReleaseTexture(bar.topLineShadow)
+    ReleaseTexture(bar.bottomLineShadow)
+end
+
+local function CreateBarForSlot(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return nil end
+    if not bars[slotKey] then
+        bars[slotKey] = CreateBackground(slot.frameName or ("QFXSystemBarInfoStrip" .. tostring(slotKey)), slotKey)
+    end
+    return bars[slotKey]
+end
+
+local function CreateBars()
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        if IsSlotEnabled(slotKey) then
+            CreateBarForSlot(slotKey)
+        elseif bars[slotKey] then
+            ReleaseBarMaterials(bars[slotKey])
+            bars[slotKey]:Hide()
+        end
+    end
+end
+
+local function EnsureSlotModules(slotKey)
+    if not IsSlotEnabled(slotKey) then return end
+    modules[slotKey] = modules[slotKey] or {}
+    for _, id in ipairs(GetOrderForSlot(slotKey)) do
+        if IsItemEnabled(slotKey, id) then
+            CreateTextModule(slotKey, id)
+        end
+    end
+end
+
+local function EnsureModules()
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        EnsureSlotModules(slotKey)
+    end
+end
+
+local textFuncs
+
+do
+local function TextGuild()
+    local online = GetOnlineGuild()
+    return ShortInfoLabel("Guild", "G") .. ": " .. MyColor() .. (online or LT("None")) .. "|r"
+end
+
+local function TextFriend()
+    return string.format("%s: %s%d|r", ShortInfoLabel("Friends", "F"), MyColor(), GetOnlineFriends())
+end
+
+local function TextMeetingStone()
+    return GetPremadeLauncherDisplayName()
+end
+
+local function TextPrimaryProfessions()
+    return professionInfoBar.GetText(false, INFOBAR_ICON_SIZE)
+end
+
+local function TextSecondaryProfessions()
+    return professionInfoBar.GetText(true, INFOBAR_ICON_SIZE)
+end
+
+local function TextMount()
+    return GetConfiguredMountIcons(INFOBAR_ICON_SIZE) or LT("Mount")
+end
+
+local function TextFPS()
+    local fps = math.floor((GetFramerate and GetFramerate() or 0) + 0.5)
+    local _, _, latency = GetNetLatency()
+    return "FPS: " .. ColorFPS(fps) .. " | " .. ColorLatency(latency)
+end
+
+local function TextCombatLog()
+    local enabled = ReadAdvancedCombatLogState()
+    local state = enabled and ("|cff00ff00" .. LT("ON") .. "|r") or ("|cffff3333" .. LT("OFF") .. "|r")
+    return LT("Combat Log") .. ": " .. state
+end
+
+local function TextItemLevel()
+    local total, equipped
+    if GetAverageItemLevel then total, equipped = GetAverageItemLevel() end
+    local value = equipped or total
+    local label = LT("Item Level")
+    if value then return label .. ": " .. MyColor() .. string.format("%.0f", value) .. "|r" end
+    return label .. ": --"
+end
+
+local function TextMythicPlus()
+    return LT("Score") .. ": " .. ColorMythicPlusScore(GetMythicPlusScore())
+end
+
+local function TextZone(btn)
+    local text = (GetMinimapZoneText and GetMinimapZoneText()) or (GetAreaText and GetAreaText()) or ""
+    local r, g, b = GetZoneTextColor()
+    if btn and btn.text then btn.text:SetTextColor(r, g, b, 1) end
+    return text
+end
+
+local lastCoordsKey, lastCoordsText
+local function TextCoords()
+    local x, y = GetCoords()
+    if not x or not y then
+        lastCoordsKey, lastCoordsText = nil, nil
+        return "XY: " .. MyColor() .. FormatCoords(x, y) .. "|r"
+    end
+    -- Stationary fast path: same 0.1-precision cell as last tick, reuse the
+    -- exact string so UpdateOneInfoBarText's equality check skips SetText.
+    -- (The C_Map query itself can't be skipped without knowing we moved.)
+    local key = string.format("%.1f|%.1f", x * 100, y * 100)
+    if key == lastCoordsKey and lastCoordsText then return lastCoordsText end
+    lastCoordsKey = key
+    lastCoordsText = "XY: " .. MyColor() .. FormatCoords(x, y) .. "|r"
+    return lastCoordsText
+end
+
+local function TextPhase()
+    local id = GetPhaseLikeID()
+    return "ID: " .. MyColor() .. tostring(id or "--") .. "|r"
+end
+
+local function TextSpec()
+    return GetSpecText()
+end
+
+local function TextDura()
+    local pct = GetDurabilityPercent()
+    local label = LT("Durability")
+    if pct then return label .. ": " .. ColorDurability(pct) end
+    return label .. ": " .. MyColor() .. (NONE or LT("None")) .. "|r"
+end
+
+local function TextGold()
+    if showSlots then
+        return string.format("|cff00ff00%d|r", GetBagFreeSlots())
+    end
+    return FormatMoney(GetMoney and GetMoney() or 0)
+end
+
+local function TextVolume()
+    local value = ns.IsInfoBarMasterSoundMuted() and LT("Muted") or (ns.GetInfoBarMasterVolumePercent() .. "%")
+    return LT("Vol") .. " " .. value
+end
+
+local function TextTime()
+    return GetTimeText()
+end
+
+textFuncs = {
+    greatvault = function() return LT("Vault") end,
+    mrt = function() return "MRT" end,
+    mdt = function() return "MDT" end,
+    guild = TextGuild,
+    friend = TextFriend,
+    meetingstone = TextMeetingStone,
+    profession = TextPrimaryProfessions,
+    secondaryprofession = TextSecondaryProfessions,
+    mount = TextMount,
+    fps = TextFPS,
+    combatlog = TextCombatLog,
+    zone = TextZone,
+    coords = TextCoords,
+    phase = TextPhase,
+    spec = TextSpec,
+    ilvl = TextItemLevel,
+    mplus = TextMythicPlus,
+    dura = TextDura,
+    gold = TextGold,
+    volume = TextVolume,
+    time = TextTime,
+}
+end
+
+local function HideSlotModules(slotKey)
+    for _, btn in pairs(modules[slotKey] or {}) do
+        btn:Hide()
+    end
+end
+
+local function ShouldUpdateInfoBarID(id, filter)
+    if not filter then return true end
+    if type(filter) == "string" then return id == filter end
+    return type(filter) == "table" and filter[id] == true
+end
+
+local function ApplyInfoBarTextStyle(btn, force)
+    if not btn or not btn.text then return end
+    local fontPath, fontFlag = GetInfoBarTextFont()
+    local fontSize = GetInfoBarFontSize()
+    if force or btn.qfxInfoBarFontPath ~= fontPath or btn.qfxInfoBarFontSize ~= fontSize or btn.qfxInfoBarFontFlag ~= fontFlag then
+        btn.text:SetFont(fontPath, fontSize, fontFlag or "")
+        btn.qfxInfoBarFontPath = fontPath
+        btn.qfxInfoBarFontSize = fontSize
+        btn.qfxInfoBarFontFlag = fontFlag
+    end
+    if force then
+        btn.text:SetTextColor(1, 1, 1, 1)
+    end
+    if not btn.text:IsShown() then
+        btn.text:Show()
+    end
+end
+
+local function HideInfoBarIconTextures(btn)
+    for _, texture in ipairs(btn and btn.qfxInfoBarIconTextures or {}) do
+        texture:Hide()
+    end
+end
+
+local function GetInfoBarIconTextureList(id)
+    local textures = {}
+    if id == "mount" then
+        return GetConfiguredMountIconTextures()
+    end
+    if id == "profession" or id == "secondaryprofession" then
+        local secondary = id == "secondaryprofession"
+        for _, entry in ipairs(professionInfoBar.GetEntries(secondary)) do
+            if entry.icon then textures[#textures + 1] = entry.icon end
+        end
+    end
+    if ns.CREST_DATA_MAP and ns.CREST_DATA_MAP[id] then
+        local info
+        if C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo then
+            local ok, result = pcall(C_CurrencyInfo.GetCurrencyInfo, ns.CREST_DATA_MAP[id].id)
+            if ok then info = result end
+        end
+        if info and info.iconFileID then
+            textures[#textures + 1] = info.iconFileID
+        else
+            textures[#textures + 1] = ns.CREST_DATA_MAP[id].icon
+        end
+    end
+    return textures
+end
+
+local function UpdateInfoBarIconTextures(btn, id)
+    if id ~= "mount" and id ~= "profession" and id ~= "secondaryprofession"
+        and not (ns.CREST_DATA_MAP and ns.CREST_DATA_MAP[id]) then
+        return false
+    end
+    local icons = GetInfoBarIconTextureList(id)
+    if #icons == 0 then
+        HideInfoBarIconTextures(btn)
+        if btn.crestNumber then btn.crestNumber:Hide() end
+        return false
+    end
+
+    btn.qfxInfoBarIconTextures = btn.qfxInfoBarIconTextures or {}
+    local totalWidth = (#icons * INFOBAR_ICON_SIZE) + ((#icons - 1) * INFOBAR_ICON_GAP)
+    local startX = -totalWidth / 2
+    for index, icon in ipairs(icons) do
+        local texture = btn.qfxInfoBarIconTextures[index]
+        if not texture then
+            texture = btn:CreateTexture(nil, "OVERLAY")
+            btn.qfxInfoBarIconTextures[index] = texture
+        end
+        texture:ClearAllPoints()
+        texture:SetSize(INFOBAR_ICON_SIZE, INFOBAR_ICON_SIZE)
+        texture:SetPoint("LEFT", btn, "CENTER", startX + ((index - 1) * (INFOBAR_ICON_SIZE + INFOBAR_ICON_GAP)), 0)
+        texture:SetTexture(icon)
+        texture:SetTexCoord(4 / 64, 60 / 64, 4 / 64, 60 / 64)
+        texture:Show()
+    end
+    for index = #icons + 1, #btn.qfxInfoBarIconTextures do
+        btn.qfxInfoBarIconTextures[index]:Hide()
+    end
+    if ns.CREST_DATA_MAP and ns.CREST_DATA_MAP[id] and btn.crestNumber then
+        local iconRight = startX + totalWidth
+        btn.crestNumber:ClearAllPoints()
+        btn.crestNumber:SetPoint("LEFT", btn, "CENTER", iconRight + 2, 0)
+        if ns.UpdateCrestNumber then ns.UpdateCrestNumber(btn, id) end
+        btn.text:Hide()
+        return true
+    end
+    btn.text:Hide()
+    return true
+end
+
+local function UpdateOneInfoBarText(btn, id, forceStyle)
+    if not btn or not btn.text then return false end
+    ApplyInfoBarTextStyle(btn, forceStyle)
+    if UpdateInfoBarIconTextures(btn, id) then return true end
+    HideInfoBarIconTextures(btn)
+    if btn.crestNumber then btn.crestNumber:Hide() end
+    local func = textFuncs[id]
+    -- Text-only refresh: equal-width cell geometry is owned by
+    -- AnchorSlotModules(), so never resize or re-anchor here.
+    local text = func and func(btn) or id
+    if forceStyle or btn.qfxInfoBarText ~= text then
+        btn.text:SetText(text)
+        btn.qfxInfoBarText = text
+    end
+    return true
+end
+
+local function UpdateTexts(filter, forceStyle)
+    local updated = false
+    for slotKey, byID in pairs(modules) do
+        for id, btn in pairs(byID) do
+            if ShouldUpdateInfoBarID(id, filter) and IsSlotEnabled(slotKey) and IsItemEnabled(slotKey, id) then
+                updated = UpdateOneInfoBarText(btn, id, forceStyle) or updated
+            end
+        end
+    end
+    return updated
+end
+
+local function RefreshInfoBarTextOnly(filter)
+    if DB().isInfoBar ~= true then return false end
+    return UpdateTexts(filter, false)
+end
+
+-- Re-applies every EUI-dependent visual: bar body/rails, item text (the font
+-- and any text color the item set itself) and the volume panel. Called from
+-- the skin callback, from EUI's OnLooksChanged, and when the user toggles the
+-- "Match EllesmereUI Skin" option; all writes are visual-only and safe in or
+-- out of combat.
+local function ApplyEuiLooks()
+    for slotKey, bar in pairs(bars) do
+        if bar and IsSlotEnabled(slotKey) then UpdateBarVisual(slotKey) end
+    end
+    -- UpdateTexts already filters to enabled slots/items and forces the text
+    -- style, so disabled items are not re-queried just because the EUI look
+    -- changed.
+    UpdateTexts(nil, true)
+    ApplyInfoBarVolumePanelSkin()
+    if ns.RefreshConfigControls then ns.RefreshConfigControls() end
+end
+
+function ns.OnInfoBarEuiSkinChanged()
+    ns.RefreshInfoBars()
+    ApplyInfoBarVolumePanelSkin()
+end
+
+RegisterInfoBarEuiSkin = function()
+    local EUI = _G.EllesmereUI
+    if type(EUI) ~= "table" or type(EUI.RegisterSkin) ~= "function" then return false end
+
+    EUI.RegisterSkin("QFXSystemBar", function(S)
+        euiSkin.facade = S
+        if type(S.GetFont) == "function" then
+            local path, flag = S.GetFont()
+            if type(path) == "string" and path ~= "" then
+                euiSkin.fontPath, euiSkin.fontFlag = path, flag or ""
+            end
+        end
+        if type(S.OnLooksChanged) == "function" then
+            S.OnLooksChanged(ApplyEuiLooks)
+        end
+        ApplyEuiLooks()
+    end)
+    return true
+end
+
+local function RefreshInfoBarItems(filter)
+    if DB().isInfoBar ~= true then return end
+    EnsureInfoBarDefaults()
+    CreateBars()
+    EnsureModules()
+    UpdateTexts(filter, true)
+end
+
+RefreshInfoBarItem = function(id)
+    if not IsAnyInfoBarItemEnabled(id) then return end
+    if not RefreshInfoBarTextOnly(id) then
+        RefreshInfoBarItems(id)
+    end
+end
+
+UpdateItemTickers = function()
+    if not C_Timer or not C_Timer.NewTicker then return end
+    for id, interval in pairs(ITEM_REFRESH_INTERVALS) do
+        local active = IsAnyInfoBarItemEnabled(id)
+        if active and not itemTickers[id] then
+            itemTickers[id] = C_Timer.NewTicker(interval, function()
+                if not IsAnyInfoBarItemEnabled(id) then
+                    local ticker = itemTickers[id]
+                    if ticker then ticker:Cancel() end
+                    itemTickers[id] = nil
+                    return
+                end
+                RefreshInfoBarItem(id)
+            end)
+        elseif (not active) and itemTickers[id] then
+            itemTickers[id]:Cancel()
+            itemTickers[id] = nil
+        end
+    end
+end
+
+local function AnchorSlotModules(slotKey)
+    local bar = bars[slotKey]
+    local slot = GetSlot(slotKey)
+    if not bar or not slot then return end
+    HideSlotModules(slotKey)
+    if not IsSlotEnabled(slotKey) then return end
+
+    local visible = {}
+    for _, id in ipairs(GetOrderForSlot(slotKey)) do
+        if IsItemEnabled(slotKey, id) then
+            local btn = modules[slotKey] and modules[slotKey][id]
+            if not btn and IsSlotEnabled(slotKey) then btn = CreateTextModule(slotKey, id) end
+            if btn then visible[#visible + 1] = btn end
+        end
+    end
+    if #visible == 0 then return end
+
+    while #visible > MAX_INFOBAR_ITEMS_PER_BAR do
+        table.remove(visible)
+    end
+
+    -- 收集可见按钮及其 span。
+    local visible = {}
+    local totalSpan = 0
+    for _, id in ipairs(GetOrderForSlot(slotKey)) do
+        if IsItemEnabled(slotKey, id) then
+            local btn = modules[slotKey] and modules[slotKey][id]
+            if not btn and IsSlotEnabled(slotKey) then btn = CreateTextModule(slotKey, id) end
+            if btn then
+                local itemDef = ns.InfoBarItems[id]
+                local span = (itemDef and itemDef.span) or 1
+                btn.qfxSpan = span
+                visible[#visible + 1] = btn
+                totalSpan = totalSpan + span
+            end
+        end
+    end
+    if #visible == 0 then return end
+
+    local currentSpan = 0
+    local filtered = {}
+    for _, btn in ipairs(visible) do
+        local span = btn.qfxSpan or 1
+        if currentSpan + span <= MAX_INFOBAR_ITEMS_PER_BAR then
+            filtered[#filtered + 1] = btn
+            currentSpan = currentSpan + span
+        else
+            totalSpan = totalSpan - span
+        end
+    end
+    visible = filtered
+    if #visible == 0 then return end
+    if totalSpan <= 0 then return end
+
+    local width = GetBarWidth(slotKey)
+    local height = GetBarHeight(slotKey)
+    local unitWidth = width / totalSpan
+    local textBoxHeight = GetInfoBarTextBoxHeight(height, GetInfoBarFontSize())
+
+    local leftOffset = 0
+    for _, btn in ipairs(visible) do
+        local span = btn.qfxSpan or 1
+        local btnWidth = span * unitWidth
+        if ns.CREST_DATA_MAP and ns.CREST_DATA_MAP[btn.id] and btnWidth < 46 then
+            btnWidth = 46
+        end
+
+        btn:SetParent(bar)
+        if bar.GetFrameLevel and btn.SetFrameLevel then btn:SetFrameLevel((bar:GetFrameLevel() or 0) + 5) end
+        btn:ClearAllPoints()
+        btn:SetSize(btnWidth + 10, textBoxHeight)
+        if btn.SetClipsChildren then
+            local isIconItem = btn.id == "profession" or btn.id == "secondaryprofession" or btn.id == "mount"
+                or (btn.id and ns.CREST_DATA_MAP and ns.CREST_DATA_MAP[btn.id])
+            btn:SetClipsChildren(not isIconItem)
+        end
+        btn:SetPoint("LEFT", bar, "LEFT", leftOffset, 0)
+        btn.text:ClearAllPoints()
+        btn.text:SetPoint("TOPLEFT", btn, "TOPLEFT", 4, 0)
+        btn.text:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -4, 0)
+        btn.text:SetSize(math.max(1, btnWidth - 8), textBoxHeight)
+        btn.text:SetJustifyH("CENTER")
+        if btn.text.SetJustifyV then btn.text:SetJustifyV("MIDDLE") end
+        btn:Show()
+
+        leftOffset = leftOffset + btnWidth
+
+        if btn.id == "meetingstone" then
+            if not meetingStoneBrokerDesired then
+                meetingStoneBrokerDesired = btn
+                HideMeetingStoneFloatingPanel()
+            else
+                btn:Hide()
+            end
+        end
+    end
+end
+
+function ns.RefreshInfoBars()
+    EnsureInfoBarDefaults()
+
+    local enabled = DB().isInfoBar == true
+    if not enabled then
+        for _, bar in pairs(bars) do
+            if bar then
+                ReleaseBarMaterials(bar)
+                bar:Hide()
+            end
+        end
+        for slotKey in pairs(modules) do HideSlotModules(slotKey) end
+        meetingStoneBrokerDesired = nil
+        RestoreMeetingStoneBroker()
+        if UpdateInfoBarEventRegistration then UpdateInfoBarEventRegistration() end
+        if UpdateItemTickers then UpdateItemTickers() end
+        return
+    end
+
+    CreateBars()
+    EnsureModules()
+
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        local bar = bars[slotKey]
+        if IsSlotEnabled(slotKey) then
+            if bar then
+                UpdateBarVisual(slotKey)
+                bar:Show()
+            end
+        elseif bar then
+            ReleaseBarMaterials(bar)
+            bar:Hide()
+        end
+    end
+    for slotKey in pairs(modules) do HideSlotModules(slotKey) end
+
+    meetingStoneBrokerDesired = nil
+    if IsAnyInfoBarItemEnabled("gold") and ns.EnsureInfoBarMoneySession then
+        ns.EnsureInfoBarMoneySession()
+    end
+    UpdateTexts(nil, true)
+    for slotKey in pairs(ns.InfoBarSlots or {}) do
+        AnchorSlotModules(slotKey)
+    end
+    if not meetingStoneBrokerDesired then RestoreMeetingStoneBroker() end
+    if UpdateInfoBarEventRegistration then UpdateInfoBarEventRegistration() end
+    if UpdateItemTickers then UpdateItemTickers() end
+end
+
+function ns.OnInfoBarChanged()
+    ns.RefreshInfoBars()
+    if ns.QueueMeetingStoneFloatingSync then
+        ns.QueueMeetingStoneFloatingSync()
+    elseif ns.SyncMeetingStoneFloatingPanel then
+        ns.SyncMeetingStoneFloatingPanel()
+    end
+end
+
+function ns.OnInfoBarMountSettingsChanged()
+    if RefreshInfoBarItem then RefreshInfoBarItem("mount") end
+end
+
+function ns.SetInfoBarUnlocked(slotKey, unlocked)
+    local slot = GetSlot(slotKey)
+    if not slot then return end
+    DB()[slot.unlockedKey] = unlocked and true or false
+    ns.RefreshInfoBars()
+end
+
+function ns.NudgeInfoBar(slotKey, dx, dy)
+    local slot = GetSlot(slotKey)
+    if not slot then return end
+    DB()[slot.xKey] = (tonumber(DB()[slot.xKey]) or slot.defaultX or 0) + (dx or 0)
+    DB()[slot.yKey] = (tonumber(DB()[slot.yKey]) or slot.defaultY or 0) + (dy or 0)
+    ns.RefreshInfoBars()
+end
+
+function ns.ResetInfoBarPosition(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return end
+    DB()[slot.xKey] = slot.defaultX or 0
+    DB()[slot.yKey] = slot.defaultY or 0
+    DB()[slot.unlockedKey] = false
+    ns.RefreshInfoBars()
+end
+
+-- Reorder the enabled items represented by the config preview while leaving
+-- disabled items in their existing slots.  That keeps a user's disabled-item
+-- ordering stable until the item is enabled again.
+function ns.MoveInfoBarItemTo(slotKey, id, visibleIndex)
+    local slot = GetSlot(slotKey)
+    if not slot or not id then return end
+    EnsureInfoBarDefaults()
+    local db = DB()
+    local order = db[slot.orderKey]
+    local enabled = db[slot.enabledKey] or {}
+    local visible = {}
+    local from
+
+    for _, value in ipairs(order) do
+        if enabled[value] == true then
+            visible[#visible + 1] = value
+            if value == id then from = #visible end
+        end
+    end
+    if not from then return end
+
+    visibleIndex = math.floor(tonumber(visibleIndex) or from)
+    if visibleIndex < 1 then visibleIndex = 1 end
+    if visibleIndex > #visible then visibleIndex = #visible end
+    if visibleIndex == from then return end
+
+    table.remove(visible, from)
+    table.insert(visible, visibleIndex, id)
+
+    local nextVisible = 1
+    for index, value in ipairs(order) do
+        if enabled[value] == true then
+            order[index] = visible[nextVisible]
+            nextVisible = nextVisible + 1
+        end
+    end
+    ns.RefreshInfoBars()
+end
+
+function ns.ResetInfoBarContent(slotKey)
+    local slot = GetSlot(slotKey)
+    if not slot then return end
+    DB()[slot.orderKey] = CopyArray(ns.defaults[slot.orderKey] or INFOBAR_ITEM_ORDER)
+    DB()[slot.enabledKey] = CopyMap(ns.defaults[slot.enabledKey] or slot.defaultItems or {})
+    ns.RefreshInfoBars()
+end
+
+local registeredInfoBarEvents = {}
+
+local function PrimeInfoBarWorldData()
+    loginTime = GetTime and GetTime() or 0
+    if IsAnyInfoBarItemEnabled("gold") and ns.EnsureInfoBarMoneySession then ns.EnsureInfoBarMoneySession() end
+    if IsAnyInfoBarItemEnabled("friend") and C_FriendList and C_FriendList.ShowFriends then pcall(C_FriendList.ShowFriends) end
+    if IsAnyInfoBarItemEnabled("guild") and IsInGuild and IsInGuild() and C_GuildInfo and C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+    if IsAnyInfoBarItemEnabled("gold") and ns.UpdateCurrentCharacterGold then ns.UpdateCurrentCharacterGold() end
+end
+
+UpdateInfoBarEventRegistration = function()
+    if not eventFrame then return end
+
+    local wanted = {}
+    wanted.PLAYER_ENTERING_WORLD = IsInfoBarEventNeeded("PLAYER_ENTERING_WORLD")
+    wanted.ADDON_LOADED = IsInfoBarEventNeeded("ADDON_LOADED")
+    for event in pairs(EVENT_ITEM_REFRESH) do
+        wanted[event] = IsInfoBarEventNeeded(event)
+    end
+
+    for event, active in pairs(wanted) do
+        if active and not registeredInfoBarEvents[event] then
+            pcall(eventFrame.RegisterEvent, eventFrame, event)
+            registeredInfoBarEvents[event] = true
+        elseif (not active) and registeredInfoBarEvents[event] then
+            pcall(eventFrame.UnregisterEvent, eventFrame, event)
+            registeredInfoBarEvents[event] = nil
+        end
+    end
+end
+
+local function RefreshEnabledItems(filter)
+    if type(filter) == "string" then
+        RefreshInfoBarItem(filter)
+        return
+    end
+    if type(filter) ~= "table" then return end
+
+    local activeFilter
+    for id in pairs(filter) do
+        if IsAnyInfoBarItemEnabled(id) then
+            activeFilter = activeFilter or {}
+            activeFilter[id] = true
+        end
+    end
+    if activeFilter and not RefreshInfoBarTextOnly(activeFilter) then RefreshInfoBarItems(activeFilter) end
+end
+
+local function GetCVarInfoBarFilter(cvarName)
+    if type(cvarName) ~= "string" or cvarName == "" then
+        return EVENT_ITEM_REFRESH.CVAR_UPDATE
+    end
+
+    local filter = CVAR_ITEM_REFRESH[cvarName]
+    if filter then return filter end
+
+    local normalized = string.lower(cvarName)
+    for knownName, knownFilter in pairs(CVAR_ITEM_REFRESH) do
+        if string.lower(knownName) == normalized then return knownFilter end
+    end
+
+    return nil
+end
+
+local function RegisterEvents()
+    if eventFrame then
+        if UpdateInfoBarEventRegistration then UpdateInfoBarEventRegistration() end
+        return
+    end
+
+    eventFrame = CreateFrame("Frame")
+    eventFrame:SetScript("OnEvent", function(_, event, name)
+        if event == "PLAYER_ENTERING_WORLD" then
+            if not IsAnyInfoBarShown() then return end
+            PrimeInfoBarWorldData()
+            QueueInfoBarRefresh(0.25)
+            return
+        end
+
+        if event == "ADDON_LOADED" then
+            if name == "MeetingStone" or name == "MeetingStoneEX" or name == "GroupFinder" or name == "PremadeGroupBoard" then
+                RefreshInfoBarItem("meetingstone")
+                if ns.QueueMeetingStoneFloatingSync then
+                    ns.QueueMeetingStoneFloatingSync()
+                elseif ns.SyncMeetingStoneFloatingPanel then
+                    ns.SyncMeetingStoneFloatingPanel()
+                end
+            end
+            return
+        end
+
+        if event == "CVAR_UPDATE" then
+            RefreshEnabledItems(GetCVarInfoBarFilter(name))
+            return
+        end
+
+        if event == "UPDATE_INSTANCE_INFO" then
+            if ns.HandleInfoBarInstanceInfoUpdate then ns.HandleInfoBarInstanceInfoUpdate() end
+            return
+        end
+
+        if event == "PLAYER_MONEY" or event == "SEND_MAIL_MONEY_CHANGED" or event == "PLAYER_TRADE_MONEY" or event == "TRADE_MONEY_CHANGED" then
+            if IsAnyInfoBarItemEnabled("gold") and ns.UpdateCurrentCharacterGold then ns.UpdateCurrentCharacterGold() end
+        end
+
+        local filter = EVENT_ITEM_REFRESH[event]
+        if type(filter) == "table" and filter.gold and ns.UpdateInfoBarMoneySession then
+            ns.UpdateInfoBarMoneySession()
+        end
+        RefreshEnabledItems(filter)
+    end)
+
+    if UpdateInfoBarEventRegistration then UpdateInfoBarEventRegistration() end
+    if UpdateItemTickers then UpdateItemTickers() end
+end
+
+StaticPopupDialogs["QFXSYSTEMBAR_RELOAD_REQUIRED"] = {
+    text = "CPU profiling requires a UI reload to fully apply.",
+    button1 = RELOADUI or LT("Reload UI"),
+    button2 = CANCEL or LT("Cancel"),
+    OnAccept = function() ReloadUI() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+}
+
+local infoBarInitialized
+local queuedInfoBarRefreshTimer
+local queuedInfoBarRefreshSerial = 0
+
+QueueInfoBarRefresh = function(delay)
+    if not ns.RefreshInfoBars then return end
+
+    delay = tonumber(delay) or 0.1
+    queuedInfoBarRefreshSerial = queuedInfoBarRefreshSerial + 1
+    local serial = queuedInfoBarRefreshSerial
+
+    if queuedInfoBarRefreshTimer and queuedInfoBarRefreshTimer.Cancel then
+        queuedInfoBarRefreshTimer:Cancel()
+    end
+    queuedInfoBarRefreshTimer = nil
+
+    local function RunRefresh()
+        if serial ~= queuedInfoBarRefreshSerial then return end
+        queuedInfoBarRefreshTimer = nil
+        if ns.RefreshInfoBars then ns.RefreshInfoBars() end
+    end
+
+    if C_Timer and C_Timer.NewTimer then
+        queuedInfoBarRefreshTimer = C_Timer.NewTimer(delay, RunRefresh)
+    elseif C_Timer and C_Timer.After then
+        C_Timer.After(delay, RunRefresh)
+    else
+        RunRefresh()
+    end
+end
+ns.QueueInfoBarRefresh = QueueInfoBarRefresh
+
+local function InitializeInfoBar()
+    -- Do not migrate or rewrite existing InfoBar SavedVariables here.
+    -- Defaults are only filled when missing, and the global InfoBar switch
+    -- remains off unless the user explicitly enables it.
+    if infoBarInitialized then return end
+    infoBarInitialized = true
+    EnsureInfoBarDefaults()
+    RegisterEvents()
+    -- EUI may load after this load-on-demand child. Only watch while still
+    -- before login (EllesmereUI is not load-on-demand, so after PLAYER_LOGIN
+    -- it can no longer appear); the watcher unregisters itself at login.
+    if not RegisterInfoBarEuiSkin() and not (type(IsLoggedIn) == "function" and IsLoggedIn()) then
+        local euiWatcher = CreateFrame("Frame")
+        euiWatcher:RegisterEvent("ADDON_LOADED")
+        euiWatcher:RegisterEvent("PLAYER_LOGIN")
+        euiWatcher:SetScript("OnEvent", function(self, event, name)
+            if event == "PLAYER_LOGIN" then
+                self:UnregisterAllEvents()
+            elseif name == "EllesmereUI" and RegisterInfoBarEuiSkin() then
+                self:UnregisterAllEvents()
+            end
+        end)
+    end
+    -- A login-deferred LoadOnDemand child may be initialized after
+    -- PLAYER_ENTERING_WORLD has already fired. Prime the same session data in
+    -- that case so gold/friend/guild data and CPU averages retain their old
+    -- behavior despite the delayed load.
+    if type(IsLoggedIn) == "function" and IsLoggedIn() and IsAnyInfoBarShown() then
+        PrimeInfoBarWorldData()
+    end
+    QueueInfoBarRefresh()
+end
+ns.InitializeInfoBar = InitializeInfoBar
+
+InitializeInfoBar()
+
+if EventUtil and EventUtil.ContinueOnPlayerLogin then
+    EventUtil.ContinueOnPlayerLogin(function() QueueInfoBarRefresh(0.1) end)
+end
